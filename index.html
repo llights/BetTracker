@@ -556,7 +556,13 @@
       const setField = k => v => setForm(f => ({ ...f, [k]: v }));
 
       const submitBet = useCallback(() => {
-        if (!form.match.trim()) { setFormError("Match is required"); return; }
+        if (form.betCategory === "Parlay") {
+          const legs = form.parlayLegs || [];
+          if (legs.length === 0) { setFormError("Add at least one leg"); return; }
+          if (legs.some(l => !l.match.trim())) { setFormError("All legs must have a match"); return; }
+        } else {
+          if (!form.match.trim()) { setFormError("Match is required"); return; }
+        }
         if (!form.stake || isNaN(Number(form.stake))) { setFormError("Enter a valid stake amount"); return; }
         setFormError("");
         const newBet = {
