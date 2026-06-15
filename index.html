@@ -642,7 +642,7 @@
             selection: form.selection.trim(),
             odds: form.odds ? Number(form.odds) : null,
             stake: Number(form.stake),
-            payout: form.payout ? Number(form.payout) : 0,
+            payout: form.payout ? Number(form.payout) : (form.status === "Win" && form.odds ? Math.round(Number(form.stake) * Number(form.odds) * 100) / 100 : 0),
             status: form.status,
           }),
         };
@@ -856,7 +856,32 @@
 
                   <DropDown label="Status" value={form.status} onChange={setField("status")} options={["Pending","Win","Loss","Void"]} />
                   {form.status === "Win" && (
-                    <Field label="Payout ($)" value={form.payout} onChange={setField("payout")} type="number" placeholder="Total payout received" />
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Payout ($)</label>
+                        {Number(form.stake) > 0 && Number(form.odds) > 0 && !form.payout && (
+                          <span style={{ fontSize: 10, color: "#6366f1", fontWeight: 500 }}>Auto-calculated</span>
+                        )}
+                      </div>
+                      <input
+                        type="number"
+                        value={form.payout || (Number(form.stake) > 0 && Number(form.odds) > 0 ? Math.round(Number(form.stake) * Number(form.odds) * 100) / 100 : "")}
+                        onChange={e => setField("payout")(e.target.value)}
+                        placeholder="e.g. 18.50"
+                        style={{
+                          width: "100%", padding: "10px 12px",
+                          border: "1px solid " + (!form.payout && Number(form.stake) > 0 && Number(form.odds) > 0 ? "#a5b4fc" : "#d1d5db"),
+                          borderRadius: 8, fontSize: 14,
+                          background: !form.payout && Number(form.stake) > 0 && Number(form.odds) > 0 ? "#eef2ff" : "#fff",
+                          color: "#111827",
+                        }}
+                      />
+                      {(form.payout || (Number(form.stake) > 0 && Number(form.odds) > 0)) && (
+                        <div style={{ fontSize: 11, color: "#10b981", marginTop: 4, fontWeight: 600 }}>
+                          Net profit: +${(Number(form.payout || Math.round(Number(form.stake) * Number(form.odds) * 100) / 100) - Number(form.stake)).toFixed(2)}
+                        </div>
+                      )}
+                    </div>
                   )}
                   {formError && (
                     <div style={{ background: "#fee2e2", color: "#991b1b", borderRadius: 8, padding: "9px 12px", fontSize: 13, marginBottom: 14 }}>⚠️ {formError}</div>
