@@ -14,7 +14,7 @@
     body { font-family: 'Inter', system-ui, sans-serif; background: #f9fafb; color: #111827; }
     @keyframes spin { to { transform: rotate(360deg); } }
     input, select, button { font-family: inherit; }
-    input:focus, select:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
+    input:focus, select:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); outline: none; }
   </style>
 </head>
 <body>
@@ -23,17 +23,13 @@
   <script type="text/babel">
     const { useState, useCallback, useRef } = React;
 
-    const STORAGE_KEY = "sgpools-bets-v2";
+    // ── CONFIG — paste your Cloudflare Worker URL here ─────────────────────────
+    const WORKER_URL = "https://bettracker.llianglengg.workers.dev/";
+    // ───────────────────────────────────────────────────────────────────────────
 
-    const loadBets = () => {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        return raw ? JSON.parse(raw) : [];
-      } catch { return []; }
-    };
-    const saveBets = (bets) => {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bets)); } catch {}
-    };
+    const STORAGE_KEY = "sgpools-bets-v2";
+    const loadBets = () => { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
+    const saveBets = (b) => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} };
 
     const STATUS_COLORS = {
       Win:     { bg: "#d1fae5", text: "#065f46", dot: "#10b981" },
@@ -43,15 +39,14 @@
     };
 
     const BET_TYPES = [
-      "1X2", "Halftime 1X2", "Halftime-Fulltime", "Asian Handicap",
-      "Halftime Asian Handicap", "1/2 Goal", "Over/Under 2.5", "Total Goals",
-      "Total Goals Odd/Even", "Halftime Total Goals", "Halftime Total Goals Odd/Even",
-      "Both Teams to Score", "Halftime Both Teams to Score", "Pick the Score",
-      "Team to Score First Goal", "Halftime Team to Score First Goal", "1st Goal Scorer",
-      "Which Half Has More Goals", "Halftime Points", "Double Chance", "Outright", "Other",
+      "1X2","Halftime 1X2","Halftime-Fulltime","Asian Handicap","Halftime Asian Handicap",
+      "1/2 Goal","Over/Under 2.5","Total Goals","Total Goals Odd/Even","Halftime Total Goals",
+      "Halftime Total Goals Odd/Even","Both Teams to Score","Halftime Both Teams to Score",
+      "Pick the Score","Team to Score First Goal","Halftime Team to Score First Goal",
+      "1st Goal Scorer","Which Half Has More Goals","Halftime Points","Double Chance","Outright","Other",
     ];
 
-    const EMPTY_FORM = { match: "", date: "", betType: "1X2", selection: "", odds: "", stake: "", payout: "", status: "Pending" };
+    const EMPTY_FORM = { match:"", date:"", betType:"1X2", selection:"", odds:"", stake:"", payout:"", status:"Pending" };
 
     // ── Shared UI ──────────────────────────────────────────────────────────────
 
@@ -75,19 +70,14 @@
       );
     }
 
-    function Field({ label, value, onChange, type = "text", placeholder, required }) {
+    function Field({ label, value, onChange, type="text", placeholder, required }) {
       return (
         <div style={{ marginBottom: 14 }}>
           <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 5 }}>
             {label}{required && <span style={{ color: "#ef4444" }}> *</span>}
           </label>
-          <input
-            type={type}
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            placeholder={placeholder}
-            style={{ width: "100%", padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, outline: "none", background: "#fff", color: "#111827" }}
-          />
+          <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+            style={{ width: "100%", padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, background: "#fff", color: "#111827" }} />
         </div>
       );
     }
@@ -96,11 +86,8 @@
       return (
         <div style={{ marginBottom: 14 }}>
           <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 5 }}>{label}</label>
-          <select
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            style={{ width: "100%", padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, background: "#fff", color: "#111827", outline: "none" }}
-          >
+          <select value={value} onChange={e => onChange(e.target.value)}
+            style={{ width: "100%", padding: "10px 12px", border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14, background: "#fff", color: "#111827" }}>
             {options.map(o => <option key={o} value={o}>{o}</option>)}
           </select>
         </div>
@@ -110,19 +97,12 @@
     // ── Scan Tab ───────────────────────────────────────────────────────────────
 
     function ScanTab({ onBetsScanned, setTab }) {
-      const [image, setImage] = useState(null);
+      const [image, setImage]       = useState(null);
       const [scanning, setScanning] = useState(false);
-      const [results, setResults] = useState(null);
-      const [error, setError] = useState("");
+      const [results, setResults]   = useState(null);
+      const [error, setError]       = useState("");
       const [confirmed, setConfirmed] = useState(false);
-      const [apiKey, setApiKey] = useState(() => localStorage.getItem("sgpools-apikey") || "");
-      const [showKey, setShowKey] = useState(false);
       const inputRef = useRef();
-
-      const saveApiKey = (val) => {
-        setApiKey(val);
-        localStorage.setItem("sgpools-apikey", val);
-      };
 
       const handleFile = (file) => {
         if (!file) return;
@@ -132,9 +112,7 @@
           const dataUrl = e.target.result;
           const base64 = dataUrl.split(",")[1];
           setImage({ dataUrl, base64, mediaType });
-          setResults(null);
-          setError("");
-          setConfirmed(false);
+          setResults(null); setError(""); setConfirmed(false);
         };
         reader.readAsDataURL(file);
       };
@@ -147,65 +125,29 @@
 
       const scanImage = async () => {
         if (!image) return;
-        if (!apiKey.trim()) { setError("Please enter your Anthropic API key above first."); return; }
-        setScanning(true);
-        setError("");
-        setResults(null);
-
-        const prompt = `You are a Singapore Pools bet slip parser. Analyse this bet slip image and extract ALL bets shown.
-
-For each bet, return a JSON object with these exact fields:
-- match: the two teams or event name (string)
-- date: match date in "DD MMM YYYY" format if visible, else ""
-- betType: one of exactly these values: "1X2", "Halftime 1X2", "Halftime-Fulltime", "Asian Handicap", "Halftime Asian Handicap", "1/2 Goal", "Over/Under 2.5", "Total Goals", "Total Goals Odd/Even", "Halftime Total Goals", "Halftime Total Goals Odd/Even", "Both Teams to Score", "Halftime Both Teams to Score", "Pick the Score", "Team to Score First Goal", "Halftime Team to Score First Goal", "1st Goal Scorer", "Which Half Has More Goals", "Halftime Points", "Double Chance", "Outright", "Other"
-- selection: the chosen outcome (e.g. "Home Win", "Over 2.5", "Man Utd")
-- odds: decimal odds as a number, or null if not shown
-- stake: bet amount in SGD as a number
-- payout: potential/actual payout in SGD as a number, or 0 if not shown
-- status: "Pending" (default unless slip shows result)
-
-Return ONLY a JSON array of bet objects — no prose, no markdown, no explanation.
-If no bets can be found, return an empty array [].`;
+        setScanning(true); setError(""); setResults(null);
 
         try {
-          const response = await fetch("https://api.anthropic.com/v1/messages", {
+          const res = await fetch(WORKER_URL, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-api-key": apiKey.trim(),
-              "anthropic-version": "2023-06-01",
-              "anthropic-dangerous-direct-browser-access": "true",
-            },
-            body: JSON.stringify({
-              model: "claude-sonnet-4-6",
-              max_tokens: 1000,
-              messages: [{
-                role: "user",
-                content: [
-                  { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.base64 } },
-                  { type: "text", text: prompt }
-                ]
-              }]
-            })
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageBase64: image.base64, mediaType: image.mediaType }),
           });
 
-          if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            throw new Error(errData.error?.message || `API error ${response.status}`);
+          const data = await res.json();
+
+          if (!res.ok) {
+            throw new Error(data.error || `Worker error ${res.status}`);
           }
 
-          const data = await response.json();
-          const raw = (data.content || []).map(b => b.text || "").join("").trim();
-          const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
-          const parsed = JSON.parse(cleaned);
-
-          if (!Array.isArray(parsed) || parsed.length === 0) {
-            setError("No bets detected. Try a clearer, well-lit photo of your bet slip.");
+          const bets = data.bets || [];
+          if (bets.length === 0) {
+            setError("No bets detected. Try a clearer, well-lit photo of the bet slip.");
           } else {
-            setResults(parsed);
+            setResults(bets);
           }
         } catch (err) {
-          setError(err.message || "Failed to scan. Check your API key and connection.");
+          setError(err.message || "Failed to scan. Check your Worker URL and connection.");
         } finally {
           setScanning(false);
         }
@@ -216,7 +158,7 @@ If no bets can be found, return an empty array [].`;
         const newBets = results.map(b => ({
           id: Date.now() + Math.random(),
           match: b.match || "Unknown Match",
-          date: b.date || new Date().toLocaleDateString("en-SG", { day: "2-digit", month: "short", year: "numeric" }),
+          date: b.date || new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" }),
           betType: BET_TYPES.includes(b.betType) ? b.betType : "Other",
           selection: b.selection || "",
           odds: b.odds ? Number(b.odds) : null,
@@ -232,27 +174,16 @@ If no bets can be found, return an empty array [].`;
       return (
         <div>
           <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Scan Slip</div>
-          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>Upload a photo of your SG Pools bet slip — AI will extract all bets automatically.</div>
-
-          {/* API Key input */}
-          <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#0369a1", marginBottom: 6 }}>🔑 Anthropic API Key</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                type={showKey ? "text" : "password"}
-                value={apiKey}
-                onChange={e => saveApiKey(e.target.value)}
-                placeholder="sk-ant-..."
-                style={{ flex: 1, padding: "8px 10px", border: "1px solid #bae6fd", borderRadius: 6, fontSize: 13, outline: "none", background: "#fff" }}
-              />
-              <button onClick={() => setShowKey(v => !v)} style={{ padding: "8px 10px", border: "1px solid #bae6fd", borderRadius: 6, background: "#fff", cursor: "pointer", fontSize: 12, color: "#0369a1" }}>
-                {showKey ? "Hide" : "Show"}
-              </button>
-            </div>
-            <div style={{ fontSize: 11, color: "#0284c7", marginTop: 6 }}>
-              Saved locally on your device only. Get yours at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: "#0284c7" }}>console.anthropic.com</a>
-            </div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
+            Upload a photo of your SG Pools bet slip — AI will extract all bets automatically.
           </div>
+
+          {/* Worker URL status */}
+          {WORKER_URL === "https://YOUR-WORKER.YOUR-NAME.workers.dev" && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#c2410c" }}>
+              ⚠️ <strong>Setup needed:</strong> Open <code>index.html</code>, find <code>WORKER_URL</code> at the top and replace it with your Cloudflare Worker URL.
+            </div>
+          )}
 
           {/* Upload area */}
           <div
@@ -261,14 +192,10 @@ If no bets can be found, return an empty array [].`;
             onClick={() => !image && inputRef.current.click()}
             style={{
               border: image ? "2px solid #6366f1" : "2px dashed #d1d5db",
-              borderRadius: 14,
-              background: image ? "#f5f3ff" : "#fff",
-              padding: image ? 0 : "36px 20px",
-              textAlign: "center",
-              cursor: image ? "default" : "pointer",
-              marginBottom: 16,
-              overflow: "hidden",
-              transition: "border 0.2s, background 0.2s",
+              borderRadius: 14, background: image ? "#f5f3ff" : "#fff",
+              padding: image ? 0 : "36px 20px", textAlign: "center",
+              cursor: image ? "default" : "pointer", marginBottom: 16,
+              overflow: "hidden", transition: "border 0.2s, background 0.2s",
             }}
           >
             {image ? (
@@ -277,9 +204,7 @@ If no bets can be found, return an empty array [].`;
                 <button
                   onClick={e => { e.stopPropagation(); setImage(null); setResults(null); setError(""); setConfirmed(false); }}
                   style={{ position: "absolute", top: 8, right: 8, background: "#0f172a", color: "#fff", border: "none", borderRadius: 20, padding: "3px 10px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}
-                >
-                  ✕ Remove
-                </button>
+                >✕ Remove</button>
               </div>
             ) : (
               <>
@@ -293,16 +218,12 @@ If no bets can be found, return an empty array [].`;
 
           {/* Scan button */}
           {image && !results && !confirmed && (
-            <button
-              onClick={scanImage}
-              disabled={scanning}
-              style={{
-                width: "100%", background: scanning ? "#818cf8" : "#6366f1", color: "#fff",
-                border: "none", borderRadius: 8, padding: "12px", fontSize: 14, fontWeight: 600,
-                cursor: scanning ? "not-allowed" : "pointer", marginBottom: 16,
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              }}
-            >
+            <button onClick={scanImage} disabled={scanning} style={{
+              width: "100%", background: scanning ? "#818cf8" : "#6366f1", color: "#fff",
+              border: "none", borderRadius: 8, padding: "12px", fontSize: 14, fontWeight: 600,
+              cursor: scanning ? "not-allowed" : "pointer", marginBottom: 16,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}>
               {scanning ? (
                 <>
                   <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
@@ -340,16 +261,12 @@ If no bets can be found, return an empty array [].`;
                 ))}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
-                <button
-                  onClick={() => { setResults(null); setImage(null); }}
-                  style={{ flex: 1, background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "11px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}
-                >
+                <button onClick={() => { setResults(null); setImage(null); }}
+                  style={{ flex: 1, background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "11px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>
                   Rescan
                 </button>
-                <button
-                  onClick={confirmBets}
-                  style={{ flex: 2, background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
-                >
+                <button onClick={confirmBets}
+                  style={{ flex: 2, background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
                   Save {results.length} Bet{results.length !== 1 ? "s" : ""}
                 </button>
               </div>
@@ -368,17 +285,16 @@ If no bets can be found, return an empty array [].`;
     // ── Main App ───────────────────────────────────────────────────────────────
 
     function App() {
-      const [bets, setBets] = useState(() => loadBets());
-      const [tab, setTab] = useState("dashboard");
-      const [form, setForm] = useState(EMPTY_FORM);
-      const [formError, setFormError] = useState("");
-      const [saved, setSaved] = useState(false);
+      const [bets, setBets]               = useState(() => loadBets());
+      const [tab, setTab]                 = useState("dashboard");
+      const [form, setForm]               = useState(EMPTY_FORM);
+      const [formError, setFormError]     = useState("");
+      const [saved, setSaved]             = useState(false);
       const [filterStatus, setFilterStatus] = useState("All");
-      const [expandedId, setExpandedId] = useState(null);
+      const [expandedId, setExpandedId]   = useState(null);
 
       const setField = k => v => setForm(f => ({ ...f, [k]: v }));
-
-      const todayStr = () => new Date().toLocaleDateString("en-SG", { day: "2-digit", month: "short", year: "numeric" });
+      const todayStr = () => new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" });
 
       const submitBet = useCallback(() => {
         if (!form.match.trim()) { setFormError("Match is required"); return; }
@@ -386,18 +302,14 @@ If no bets can be found, return an empty array [].`;
         setFormError("");
         const newBet = {
           id: Date.now() + Math.random(),
-          match: form.match.trim(),
-          date: form.date.trim() || todayStr(),
-          betType: form.betType,
-          selection: form.selection.trim(),
+          match: form.match.trim(), date: form.date.trim() || todayStr(),
+          betType: form.betType, selection: form.selection.trim(),
           odds: form.odds ? Number(form.odds) : null,
-          stake: Number(form.stake),
-          payout: form.payout ? Number(form.payout) : 0,
+          stake: Number(form.stake), payout: form.payout ? Number(form.payout) : 0,
           status: form.status,
         };
         setBets(prev => { const next = [newBet, ...prev]; saveBets(next); return next; });
-        setForm(EMPTY_FORM);
-        setSaved(true);
+        setForm(EMPTY_FORM); setSaved(true);
         setTimeout(() => setSaved(false), 2500);
         setTab("history");
       }, [form]);
@@ -410,16 +322,15 @@ If no bets can be found, return an empty array [].`;
         setBets(prev => { const next = [...newBets, ...prev]; saveBets(next); return next; });
       }, []);
 
-      // Stats
-      const settled = bets.filter(b => b.status === "Win" || b.status === "Loss");
-      const wins    = bets.filter(b => b.status === "Win");
-      const losses  = bets.filter(b => b.status === "Loss");
-      const pending = bets.filter(b => b.status === "Pending");
+      const settled  = bets.filter(b => b.status === "Win" || b.status === "Loss");
+      const wins     = bets.filter(b => b.status === "Win");
+      const losses   = bets.filter(b => b.status === "Loss");
+      const pending  = bets.filter(b => b.status === "Pending");
       const totalStaked  = settled.reduce((s, b) => s + b.stake, 0);
       const totalReturns = wins.reduce((s, b) => s + b.payout, 0);
-      const netPnL  = totalReturns - totalStaked;
-      const roi     = totalStaked > 0 ? ((netPnL / totalStaked) * 100).toFixed(1) : "0.0";
-      const winRate = settled.length > 0 ? ((wins.length / settled.length) * 100).toFixed(0) : "—";
+      const netPnL   = totalReturns - totalStaked;
+      const roi      = totalStaked > 0 ? ((netPnL / totalStaked) * 100).toFixed(1) : "0.0";
+      const winRate  = settled.length > 0 ? ((wins.length / settled.length) * 100).toFixed(0) : "—";
       const pnlColor = netPnL >= 0 ? "#10b981" : "#ef4444";
       const filteredBets = filterStatus === "All" ? bets : bets.filter(b => b.status === filterStatus);
 
@@ -535,7 +446,7 @@ If no bets can be found, return an empty array [].`;
                     <div style={{ flex: 1 }}><Field label="Odds" value={form.odds} onChange={setField("odds")} type="number" placeholder="e.g. 1.85" /></div>
                     <div style={{ flex: 1 }}><Field label="Stake ($)" value={form.stake} onChange={setField("stake")} type="number" placeholder="e.g. 10.00" required /></div>
                   </div>
-                  <DropDown label="Status" value={form.status} onChange={setField("status")} options={["Pending", "Win", "Loss", "Void"]} />
+                  <DropDown label="Status" value={form.status} onChange={setField("status")} options={["Pending","Win","Loss","Void"]} />
                   {form.status === "Win" && (
                     <Field label="Payout ($)" value={form.payout} onChange={setField("payout")} type="number" placeholder="Total payout received" />
                   )}
@@ -555,7 +466,7 @@ If no bets can be found, return an empty array [].`;
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 8 }}>
                   <div style={{ fontSize: 18, fontWeight: 700 }}>History</div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                    {["All", "Win", "Loss", "Pending", "Void"].map(s => (
+                    {["All","Win","Loss","Pending","Void"].map(s => (
                       <button key={s} onClick={() => setFilterStatus(s)} style={{
                         background: filterStatus === s ? "#0f172a" : "#fff",
                         color: filterStatus === s ? "#fff" : "#374151",
@@ -608,10 +519,8 @@ If no bets can be found, return an empty array [].`;
                 )}
 
                 {bets.length > 0 && (
-                  <button
-                    onClick={() => { if (window.confirm("Clear all bets? This cannot be undone.")) { setBets([]); saveBets([]); } }}
-                    style={{ marginTop: 16, background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 8, padding: "7px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}
-                  >
+                  <button onClick={() => { if (window.confirm("Clear all bets? This cannot be undone.")) { setBets([]); saveBets([]); } }}
+                    style={{ marginTop: 16, background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 8, padding: "7px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
                     Clear all
                   </button>
                 )}
