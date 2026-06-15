@@ -9,6 +9,17 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+  <script>
+    // Load PDF.js as a global so Babel/React code can access it
+    window._pdfJsReady = false;
+    import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs").then(m => {
+      window.pdfjsLib = m;
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+      window._pdfJsReady = true;
+    });
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Inter', system-ui, sans-serif; background: #f9fafb; color: #111827; }
@@ -23,9 +34,9 @@
   <script type="text/babel">
     const { useState, useCallback, useRef } = React;
 
-    // ── CONFIG — paste your Cloudflare Worker URL here ─────────────────────────
+    // ── CONFIG ─────────────────────────────────────────────────────────────────
     const WORKER_URL = "https://bettracker.llianglengg.workers.dev/";
-    // ───────────────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────────────
 
     const STORAGE_KEY = "sgpools-bets-v2";
     const loadBets = () => { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
@@ -47,6 +58,8 @@
     ];
 
     const EMPTY_FORM = { match:"", date:"", betType:"1X2", selection:"", odds:"", stake:"", payout:"", status:"Pending" };
+
+    const todayStr = () => new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" });
 
     // ── Shared UI ──────────────────────────────────────────────────────────────
 
@@ -94,76 +107,146 @@
       );
     }
 
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    function readFileAsBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve({ dataUrl: e.target.result, base64: e.target.result.split(",")[1], mediaType: file.type || "image/jpeg", name: file.name });
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // Extract all text from a PDF file using PDF.js
+    async function extractPdfText(file) {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      let fullText = "";
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        fullText += content.items.map(i => i.str).join(" ") + "\n";
+      }
+      return fullText;
+    }
+
+    async function scanSingleImage(img) {
+      const res = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: img.base64, mediaType: img.mediaType }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
+      return data.bets || [];
+    }
+
+    async function scanPdfText(pdfText) {
+      const res = await fetch(WORKER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdfText }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
+      return data.bets || [];
+    }
+
     // ── Scan Tab ───────────────────────────────────────────────────────────────
 
     function ScanTab({ onBetsScanned, setTab }) {
-      const [image, setImage]       = useState(null);
-      const [scanning, setScanning] = useState(false);
-      const [results, setResults]   = useState(null);
-      const [error, setError]       = useState("");
+      // mode: "image" | "pdf"
+      const [mode, setMode]           = useState("image");
+      // image queue items: { dataUrl, base64, mediaType, name, status, bets, error }
+      const [images, setImages]       = useState([]);
+      // pdf queue items: { name, file, status, bets, error, pageCount }
+      const [pdfs, setPdfs]           = useState([]);
+      const [scanning, setScanning]   = useState(false);
+      const [allResults, setAllResults] = useState(null);
       const [confirmed, setConfirmed] = useState(false);
-      const inputRef = useRef();
+      const imgInputRef = useRef();
+      const pdfInputRef = useRef();
 
-      const handleFile = (file) => {
-        if (!file) return;
-        const mediaType = file.type || "image/jpeg";
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const dataUrl = e.target.result;
-          const base64 = dataUrl.split(",")[1];
-          setImage({ dataUrl, base64, mediaType });
-          setResults(null); setError(""); setConfirmed(false);
-        };
-        reader.readAsDataURL(file);
+      const reset = () => { setImages([]); setPdfs([]); setAllResults(null); setConfirmed(false); };
+
+      // ── Image handlers ──
+      const addImageFiles = async (files) => {
+        const imgFiles = Array.from(files).filter(f => f.type.startsWith("image/"));
+        if (!imgFiles.length) return;
+        const loaded = await Promise.all(imgFiles.map(readFileAsBase64));
+        setImages(prev => [...prev, ...loaded.map(img => ({ ...img, status: "idle", bets: [], error: "" }))]);
+        setAllResults(null); setConfirmed(false);
+      };
+
+      // ── PDF handlers ──
+      const addPdfFiles = (files) => {
+        const pdfFiles = Array.from(files).filter(f => f.type === "application/pdf" || f.name.endsWith(".pdf"));
+        if (!pdfFiles.length) return;
+        setPdfs(prev => [...prev, ...pdfFiles.map(f => ({ name: f.name, file: f, status: "idle", bets: [], error: "", pageCount: null }))]);
+        setAllResults(null); setConfirmed(false);
       };
 
       const handleDrop = (e) => {
         e.preventDefault();
-        const file = e.dataTransfer.files[0];
-        if (file && file.type.startsWith("image/")) handleFile(file);
+        const files = Array.from(e.dataTransfer.files);
+        addImageFiles(files.filter(f => f.type.startsWith("image/")));
+        addPdfFiles(files.filter(f => f.type === "application/pdf" || f.name.endsWith(".pdf")));
       };
 
-      const scanImage = async () => {
-        if (!image) return;
-        setScanning(true); setError(""); setResults(null);
+      // ── Scan all ──
+      const scanAll = async () => {
+        setScanning(true); setAllResults(null);
 
-        try {
-          const res = await fetch(WORKER_URL, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ imageBase64: image.base64, mediaType: image.mediaType }),
-          });
+        const allBets = [];
 
-          const data = await res.json();
-
-          if (!res.ok) {
-            throw new Error(data.error || `Worker error ${res.status}`);
-          }
-
-          const bets = data.bets || [];
-          if (bets.length === 0) {
-            setError("No bets detected. Try a clearer, well-lit photo of the bet slip.");
-          } else {
-            setResults(bets);
-          }
-        } catch (err) {
-          setError(err.message || "Failed to scan. Check your Worker URL and connection.");
-        } finally {
-          setScanning(false);
+        // Scan images in parallel
+        if (images.length) {
+          const imgResults = await Promise.all(images.map(async (img, idx) => {
+            setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "scanning" } : m));
+            try {
+              const bets = await scanSingleImage(img);
+              setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "done", bets } : m));
+              return bets;
+            } catch (err) {
+              setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "error", error: err.message } : m));
+              return [];
+            }
+          }));
+          allBets.push(...imgResults.flat());
         }
+
+        // Scan PDFs sequentially (text extraction is heavier)
+        for (let idx = 0; idx < pdfs.length; idx++) {
+          const pdf = pdfs[idx];
+          setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "extracting" } : p));
+          try {
+            if (!window._pdfJsReady) throw new Error("PDF reader not ready yet, please try again.");
+            const pdfText = await extractPdfText(pdf.file);
+            if (!pdfText.trim()) throw new Error("No text found in PDF. Try uploading a screenshot instead.");
+            setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "scanning" } : p));
+            const bets = await scanPdfText(pdfText);
+            setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "done", bets } : p));
+            allBets.push(...bets);
+          } catch (err) {
+            setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "error", error: err.message } : p));
+          }
+        }
+
+        setAllResults(allBets.map(b => ({ ...b, status: b.status || "Pending" })));
+        setScanning(false);
       };
 
-      // Make results editable
       const updateResult = (i, field, value) => {
-        setResults(prev => prev.map((b, idx) => idx === i ? { ...b, [field]: value } : b));
+        setAllResults(prev => prev.map((b, idx) => idx === i ? { ...b, [field]: value } : b));
       };
 
       const confirmBets = () => {
-        if (!results) return;
-        const newBets = results.map(b => ({
+        if (!allResults) return;
+        const newBets = allResults.map(b => ({
           id: Date.now() + Math.random(),
           match: b.match || "Unknown Match",
-          date: b.date || new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" }),
+          date: b.date || todayStr(),
           betType: BET_TYPES.includes(b.betType) ? b.betType : "Other",
           selection: b.selection || "",
           odds: b.odds ? Number(b.odds) : null,
@@ -176,140 +259,204 @@
         setTimeout(() => setTab("history"), 1500);
       };
 
+      const totalFound   = allResults ? allResults.length : 0;
+      const totalQueued  = images.length + pdfs.length;
+      const errorCount   = images.filter(m => m.status === "error").length + pdfs.filter(p => p.status === "error").length;
+
+      function Spinner() {
+        return <span style={{ display: "inline-block", width: 12, height: 12, border: "2px solid #c7d2fe", borderTopColor: "#6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />;
+      }
+
       return (
         <div>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Scan Slip</div>
-          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>
-            Upload a photo of your SG Pools bet slip — AI will extract all bets automatically.
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Scan / Import</div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
+            Upload bet slip photos or your SG Pools PDF transaction history.
           </div>
 
-          {/* Worker URL status */}
-          {WORKER_URL === "https://YOUR-WORKER.YOUR-NAME.workers.dev" && (
-            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#c2410c" }}>
-              ⚠️ <strong>Setup needed:</strong> Open <code>index.html</code>, find <code>WORKER_URL</code> at the top and replace it with your Cloudflare Worker URL.
+          {/* Mode toggle */}
+          {!allResults && !confirmed && (
+            <div style={{ display: "flex", background: "#f3f4f6", borderRadius: 10, padding: 4, marginBottom: 16, gap: 4 }}>
+              {[["image", "📷 Slip Photos"], ["pdf", "📄 PDF History"]].map(([m, label]) => (
+                <button key={m} onClick={() => setMode(m)} style={{
+                  flex: 1, padding: "8px", borderRadius: 7, border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                  background: mode === m ? "#fff" : "transparent",
+                  color: mode === m ? "#111827" : "#6b7280",
+                  boxShadow: mode === m ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                  transition: "all 0.15s",
+                }}>{label}</button>
+              ))}
             </div>
           )}
 
-          {/* Upload area */}
-          <div
-            onDrop={handleDrop}
-            onDragOver={e => e.preventDefault()}
-            onClick={() => !image && inputRef.current.click()}
-            style={{
-              border: image ? "2px solid #6366f1" : "2px dashed #d1d5db",
-              borderRadius: 14, background: image ? "#f5f3ff" : "#fff",
-              padding: image ? 0 : "36px 20px", textAlign: "center",
-              cursor: image ? "default" : "pointer", marginBottom: 16,
-              overflow: "hidden", transition: "border 0.2s, background 0.2s",
-            }}
-          >
-            {image ? (
-              <div style={{ position: "relative" }}>
-                <img src={image.dataUrl} alt="Bet slip" style={{ width: "100%", maxHeight: 340, objectFit: "contain", display: "block" }} />
-                <button
-                  onClick={e => { e.stopPropagation(); setImage(null); setResults(null); setError(""); setConfirmed(false); }}
-                  style={{ position: "absolute", top: 8, right: 8, background: "#0f172a", color: "#fff", border: "none", borderRadius: 20, padding: "3px 10px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}
-                >✕ Remove</button>
+          {/* ── Image mode ── */}
+          {mode === "image" && !allResults && !confirmed && (
+            <>
+              <div onDrop={handleDrop} onDragOver={e => e.preventDefault()}
+                onClick={() => imgInputRef.current.click()}
+                style={{ border: "2px dashed #d1d5db", borderRadius: 14, background: "#fff", padding: "28px 20px", textAlign: "center", cursor: "pointer", marginBottom: 14 }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>📷</div>
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Tap to add slip photos</div>
+                <div style={{ color: "#9ca3af", fontSize: 12 }}>Multiple images OK · JPG, PNG, HEIC</div>
+                <input ref={imgInputRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={e => addImageFiles(e.target.files)} />
               </div>
-            ) : (
-              <>
-                <div style={{ fontSize: 36, marginBottom: 10 }}>📷</div>
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Tap to upload bet slip photo</div>
-                <div style={{ color: "#9ca3af", fontSize: 12 }}>or drag & drop · JPG, PNG, HEIC</div>
-              </>
-            )}
-            <input ref={inputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
-          </div>
+              {images.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                  {images.map((img, idx) => (
+                    <div key={idx} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden", display: "flex", alignItems: "center", gap: 10 }}>
+                      <img src={img.dataUrl} alt="" style={{ width: 56, height: 56, objectFit: "cover", flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 12, minWidth: 0 }}>
+                        <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{img.name}</div>
+                        {img.status === "idle"     && <span style={{ color: "#9ca3af" }}>Ready</span>}
+                        {img.status === "scanning" && <span style={{ color: "#6366f1", display: "flex", alignItems: "center", gap: 5 }}><Spinner /> Scanning...</span>}
+                        {img.status === "done"     && <span style={{ color: "#10b981" }}>✓ {img.bets.length} bet{img.bets.length !== 1 ? "s" : ""} found</span>}
+                        {img.status === "error"    && <span style={{ color: "#ef4444" }}>⚠ {img.error}</span>}
+                      </div>
+                      {!scanning && <button onClick={() => setImages(prev => prev.filter((_,i)=>i!==idx))} style={{ padding: "6px 10px", marginRight: 8, background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 16 }}>✕</button>}
+                    </div>
+                  ))}
+                  {!scanning && (
+                    <button onClick={() => imgInputRef.current.click()} style={{ border: "1px dashed #d1d5db", borderRadius: 8, background: "#fff", color: "#6b7280", padding: "9px", fontSize: 13, cursor: "pointer" }}>
+                      + Add more images
+                    </button>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ── PDF mode ── */}
+          {mode === "pdf" && !allResults && !confirmed && (
+            <>
+              <div style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#0369a1" }}>
+                💡 Download your transaction history from <strong>sgpools.com.sg → My Account → Transaction History</strong>, save as PDF, then upload here.
+              </div>
+              <div onDrop={handleDrop} onDragOver={e => e.preventDefault()}
+                onClick={() => pdfInputRef.current.click()}
+                style={{ border: "2px dashed #d1d5db", borderRadius: 14, background: "#fff", padding: "28px 20px", textAlign: "center", cursor: "pointer", marginBottom: 14 }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>📄</div>
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Tap to upload PDF</div>
+                <div style={{ color: "#9ca3af", fontSize: 12 }}>Multiple PDFs OK</div>
+                <input ref={pdfInputRef} type="file" accept=".pdf,application/pdf" multiple style={{ display: "none" }} onChange={e => addPdfFiles(e.target.files)} />
+              </div>
+              {pdfs.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+                  {pdfs.map((pdf, idx) => (
+                    <div key={idx} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 24, flexShrink: 0 }}>📄</span>
+                      <div style={{ flex: 1, fontSize: 12, minWidth: 0 }}>
+                        <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>{pdf.name}</div>
+                        {pdf.status === "idle"       && <span style={{ color: "#9ca3af" }}>Ready</span>}
+                        {pdf.status === "extracting" && <span style={{ color: "#6366f1", display: "flex", alignItems: "center", gap: 5 }}><Spinner /> Reading PDF...</span>}
+                        {pdf.status === "scanning"   && <span style={{ color: "#6366f1", display: "flex", alignItems: "center", gap: 5 }}><Spinner /> Analysing bets...</span>}
+                        {pdf.status === "done"       && <span style={{ color: "#10b981" }}>✓ {pdf.bets.length} bet{pdf.bets.length !== 1 ? "s" : ""} found</span>}
+                        {pdf.status === "error"      && <span style={{ color: "#ef4444" }}>⚠ {pdf.error}</span>}
+                      </div>
+                      {!scanning && <button onClick={() => setPdfs(prev => prev.filter((_,i)=>i!==idx))} style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 16 }}>✕</button>}
+                    </div>
+                  ))}
+                  {!scanning && (
+                    <button onClick={() => pdfInputRef.current.click()} style={{ border: "1px dashed #d1d5db", borderRadius: 8, background: "#fff", color: "#6b7280", padding: "9px", fontSize: 13, cursor: "pointer" }}>
+                      + Add more PDFs
+                    </button>
+                  )}
+                </div>
+              )}
+            </>
+          )}
 
           {/* Scan button */}
-          {image && !results && !confirmed && (
-            <button onClick={scanImage} disabled={scanning} style={{
+          {totalQueued > 0 && !allResults && !confirmed && (
+            <button onClick={scanAll} disabled={scanning} style={{
               width: "100%", background: scanning ? "#818cf8" : "#6366f1", color: "#fff",
               border: "none", borderRadius: 8, padding: "12px", fontSize: 14, fontWeight: 600,
               cursor: scanning ? "not-allowed" : "pointer", marginBottom: 16,
               display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             }}>
               {scanning ? (
-                <>
-                  <span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-                  Scanning...
-                </>
-              ) : "🔍 Scan with AI"}
+                <><span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Scanning...</>
+              ) : `🔍 Scan ${totalQueued} file${totalQueued !== 1 ? "s" : ""}`}
             </button>
           )}
 
-          {error && (
-            <div style={{ background: "#fee2e2", color: "#991b1b", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 16 }}>
-              ⚠️ {error}
+          {/* Error summary */}
+          {allResults && errorCount > 0 && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#c2410c", marginBottom: 12 }}>
+              ⚠️ {errorCount} file{errorCount !== 1 ? "s" : ""} failed. Results below are from the rest.
             </div>
           )}
 
-          {/* Results preview — editable */}
-          {results && !confirmed && (
+          {/* Editable results */}
+          {allResults && !confirmed && (
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
-                ✅ Found {results.length} bet{results.length !== 1 ? "s" : ""} — edit then save
-              </div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>Tap any field to change it before saving.</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-                {results.map((b, i) => (
-                  <div key={i} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{b.match || "Unknown Match"}</div>
-
-                    {/* Status row */}
-                    <div style={{ marginBottom: 8 }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>RESULT</div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {["Pending","Win","Loss","Void"].map(s => {
-                          const sc = STATUS_COLORS[s];
-                          const active = (b.status || "Pending") === s;
-                          return (
-                            <button key={s} onClick={() => updateResult(i, "status", s)} style={{
-                              padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                              border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
-                              background: active ? sc.bg : "#fff",
-                              color: active ? sc.text : "#6b7280",
-                              transition: "all 0.15s",
-                            }}>{s}</button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Payout field — only when Win */}
-                    {(b.status || "Pending") === "Win" && (
-                      <div style={{ marginBottom: 4 }}>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
-                        <input
-                          type="number"
-                          value={b.payout || ""}
-                          onChange={e => updateResult(i, "payout", e.target.value)}
-                          placeholder="e.g. 18.50"
-                          style={{ width: "100%", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, outline: "none", background: "#fff" }}
-                        />
-                      </div>
-                    )}
-
-                    {/* Info row */}
-                    <div style={{ fontSize: 11, color: "#9ca3af", display: "flex", flexWrap: "wrap", gap: "3px 12px", marginTop: 8 }}>
-                      {b.date && <span>📅 {b.date}</span>}
-                      <span>🎯 {b.betType}</span>
-                      {b.selection && <span>☑️ {b.selection}</span>}
-                      {b.odds && <span>@ {b.odds}</span>}
-                      <span>💵 ${Number(b.stake || 0).toFixed(2)}</span>
-                    </div>
+              {totalFound === 0 ? (
+                <div style={{ background: "#fee2e2", color: "#991b1b", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 14 }}>
+                  ⚠️ No bets detected. Check that your PDF has selectable text (not a scanned image).
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
+                    ✅ Found {totalFound} bet{totalFound !== 1 ? "s" : ""} — edit then save
                   </div>
-                ))}
-              </div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>Tap any field to change before saving.</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                    {allResults.map((b, i) => (
+                      <div key={i} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
+                        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{b.match || "Unknown Match"}</div>
+                        <div style={{ marginBottom: 10 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {["Pending","Win","Loss","Void"].map(s => {
+                              const sc = STATUS_COLORS[s];
+                              const active = (b.status || "Pending") === s;
+                              return (
+                                <button key={s} onClick={() => updateResult(i, "status", s)} style={{
+                                  padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                  border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
+                                  background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
+                                }}>{s}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, marginBottom: (b.status || "Pending") === "Win" ? 8 : 0 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
+                            <input type="number" value={b.stake || ""} onChange={e => updateResult(i, "stake", e.target.value)} placeholder="0.00"
+                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>ODDS</div>
+                            <input type="number" value={b.odds || ""} onChange={e => updateResult(i, "odds", e.target.value)} placeholder="e.g. 1.85"
+                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                          </div>
+                        </div>
+                        {(b.status || "Pending") === "Win" && (
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
+                            <input type="number" value={b.payout || ""} onChange={e => updateResult(i, "payout", e.target.value)} placeholder="e.g. 18.50"
+                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                          </div>
+                        )}
+                        <div style={{ fontSize: 11, color: "#9ca3af", display: "flex", flexWrap: "wrap", gap: "3px 12px", marginTop: 8 }}>
+                          {b.date && <span>📅 {b.date}</span>}
+                          <span>🎯 {b.betType}</span>
+                          {b.selection && <span>☑️ {b.selection}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
               <div style={{ display: "flex", gap: 10 }}>
-                <button onClick={() => { setResults(null); setImage(null); }}
-                  style={{ flex: 1, background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "11px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>
-                  Rescan
+                <button onClick={reset} style={{ flex: 1, background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 8, padding: "11px", fontSize: 13, fontWeight: 500, cursor: "pointer" }}>
+                  Start Over
                 </button>
-                <button onClick={confirmBets}
-                  style={{ flex: 2, background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
-                  Save {results.length} Bet{results.length !== 1 ? "s" : ""}
-                </button>
+                {totalFound > 0 && (
+                  <button onClick={confirmBets} style={{ flex: 2, background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+                    Save {totalFound} Bet{totalFound !== 1 ? "s" : ""}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -326,17 +473,17 @@
     // ── Main App ───────────────────────────────────────────────────────────────
 
     function App() {
-      const [bets, setBets]               = useState(() => loadBets());
-      const [tab, setTab]                 = useState("dashboard");
-      const [form, setForm]               = useState(EMPTY_FORM);
-      const [formError, setFormError]     = useState("");
-      const [saved, setSaved]             = useState(false);
+      const [bets, setBets]                 = useState(() => loadBets());
+      const [tab, setTab]                   = useState("dashboard");
+      const [form, setForm]                 = useState(EMPTY_FORM);
+      const [formError, setFormError]       = useState("");
+      const [saved, setSaved]               = useState(false);
       const [filterStatus, setFilterStatus] = useState("All");
-      const [expandedId, setExpandedId]   = useState(null);
-      const [editPayout, setEditPayout]   = useState({});  // { [id]: string }
+      const [expandedId, setExpandedId]     = useState(null);
+      // local edits for expanded bet in history: { [id]: { payout, stake, odds } }
+      const [histEdits, setHistEdits]       = useState({});
 
       const setField = k => v => setForm(f => ({ ...f, [k]: v }));
-      const todayStr = () => new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" });
 
       const submitBet = useCallback(() => {
         if (!form.match.trim()) { setFormError("Match is required"); return; }
@@ -358,11 +505,13 @@
 
       const deleteBet = useCallback(id => {
         setBets(prev => { const next = prev.filter(b => b.id !== id); saveBets(next); return next; });
+        setHistEdits(e => { const n = {...e}; delete n[id]; return n; });
       }, []);
 
-      const updateBetStatus = useCallback((id, status, payout) => {
+      // Update any fields on a saved bet
+      const updateBet = useCallback((id, fields) => {
         setBets(prev => {
-          const next = prev.map(b => b.id === id ? { ...b, status, payout: payout !== undefined ? Number(payout) || 0 : b.payout } : b);
+          const next = prev.map(b => b.id === id ? { ...b, ...fields } : b);
           saveBets(next);
           return next;
         });
@@ -371,6 +520,11 @@
       const handleBetsScanned = useCallback(newBets => {
         setBets(prev => { const next = [...newBets, ...prev]; saveBets(next); return next; });
       }, []);
+
+      // helpers for history edit state
+      const getEdit = (id, field, fallback) => histEdits[id]?.[field] !== undefined ? histEdits[id][field] : fallback;
+      const setEdit = (id, field, value) => setHistEdits(e => ({ ...e, [id]: { ...e[id], [field]: value } }));
+      const clearEdits = (id) => setHistEdits(e => { const n = {...e}; delete n[id]; return n; });
 
       const settled  = bets.filter(b => b.status === "Win" || b.status === "Loss");
       const wins     = bets.filter(b => b.status === "Win");
@@ -437,12 +591,8 @@
                     <div style={{ fontWeight: 600, marginBottom: 6 }}>No bets yet</div>
                     <div style={{ color: "#6b7280", fontSize: 13, marginBottom: 16 }}>Scan a slip or tap "+ Add" to get started</div>
                     <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                      <button onClick={() => setTab("scan")} style={{ background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                        📷 Scan Slip
-                      </button>
-                      <button onClick={() => setTab("add")} style={{ background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                        + Add Manually
-                      </button>
+                      <button onClick={() => setTab("scan")} style={{ background: "#6366f1", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>📷 Scan Slip</button>
+                      <button onClick={() => setTab("add")} style={{ background: "#0f172a", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>+ Add Manually</button>
                     </div>
                   </div>
                 ) : (
@@ -536,9 +686,27 @@
                     {filteredBets.map(b => {
                       const pnl = b.status === "Win" ? b.payout - b.stake : b.status === "Loss" ? -b.stake : null;
                       const isOpen = expandedId === b.id;
+
+                      // draft values for editing
+                      const draftStake  = getEdit(b.id, "stake",  String(b.stake));
+                      const draftOdds   = getEdit(b.id, "odds",   b.odds != null ? String(b.odds) : "");
+                      const draftPayout = getEdit(b.id, "payout", b.payout > 0 ? String(b.payout) : "");
+
+                      const saveEdits = (newStatus) => {
+                        updateBet(b.id, {
+                          status: newStatus ?? b.status,
+                          stake:  Number(draftStake)  || b.stake,
+                          odds:   draftOdds ? Number(draftOdds) : null,
+                          payout: Number(draftPayout) || 0,
+                        });
+                        clearEdits(b.id);
+                      };
+
                       return (
                         <div key={b.id} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
-                          <div onClick={() => setExpandedId(isOpen ? null : b.id)} style={{ padding: "12px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                          {/* Row header */}
+                          <div onClick={() => { setExpandedId(isOpen ? null : b.id); if (isOpen) clearEdits(b.id); }}
+                            style={{ padding: "12px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.match}</div>
                               <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 2 }}>{b.date} · {b.betType}</div>
@@ -552,30 +720,25 @@
                               <StatusBadge status={b.status} />
                             </div>
                           </div>
-                          {isOpen && (
-                            <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-                              {/* Details */}
-                              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "#6b7280" }}>
-                                {b.selection && <span>☑️ {b.selection}</span>}
-                                <span>Stake: <strong style={{ color: "#111827" }}>${b.stake.toFixed(2)}</strong>{b.odds ? ` @ ${b.odds}` : ""}</span>
-                              </div>
 
-                              {/* Status editor */}
+                          {/* Expanded edit panel */}
+                          {isOpen && (
+                            <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", display: "flex", flexDirection: "column", gap: 10 }}>
+
+                              {b.selection && <div style={{ fontSize: 12, color: "#6b7280" }}>☑️ {b.selection}</div>}
+
+                              {/* Status buttons */}
                               <div>
-                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>UPDATE RESULT</div>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
                                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                   {["Pending","Win","Loss","Void"].map(s => {
                                     const sc = STATUS_COLORS[s];
                                     const active = b.status === s;
                                     return (
-                                      <button key={s} onClick={() => {
-                                        const p = s === "Win" ? (editPayout[b.id] ?? (b.payout > 0 ? b.payout : "")) : b.payout;
-                                        updateBetStatus(b.id, s, p);
-                                      }} style={{
+                                      <button key={s} onClick={() => saveEdits(s)} style={{
                                         padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
                                         border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
-                                        background: active ? sc.bg : "#fff",
-                                        color: active ? sc.text : "#6b7280",
+                                        background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
                                         transition: "all 0.15s",
                                       }}>{s}</button>
                                     );
@@ -583,32 +746,42 @@
                                 </div>
                               </div>
 
-                              {/* Payout input when Win */}
+                              {/* Stake + Odds row */}
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
+                                  <input type="number" value={draftStake}
+                                    onChange={e => setEdit(b.id, "stake", e.target.value)}
+                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>ODDS</div>
+                                  <input type="number" value={draftOdds} placeholder="—"
+                                    onChange={e => setEdit(b.id, "odds", e.target.value)}
+                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                                </div>
+                              </div>
+
+                              {/* Payout — shown when Win */}
                               {b.status === "Win" && (
                                 <div>
-                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>PAYOUT ($)</div>
-                                  <div style={{ display: "flex", gap: 8 }}>
-                                    <input
-                                      type="number"
-                                      value={editPayout[b.id] !== undefined ? editPayout[b.id] : (b.payout > 0 ? b.payout : "")}
-                                      onChange={e => setEditPayout(p => ({ ...p, [b.id]: e.target.value }))}
-                                      placeholder="e.g. 18.50"
-                                      style={{ flex: 1, padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, outline: "none", background: "#fff" }}
-                                    />
-                                    <button onClick={() => {
-                                      updateBetStatus(b.id, "Win", editPayout[b.id] ?? b.payout);
-                                      setEditPayout(p => { const n = {...p}; delete n[b.id]; return n; });
-                                    }} style={{ padding: "7px 14px", background: "#0f172a", color: "#fff", border: "none", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                                      Save
-                                    </button>
-                                  </div>
+                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
+                                  <input type="number" value={draftPayout} placeholder="e.g. 18.50"
+                                    onChange={e => setEdit(b.id, "payout", e.target.value)}
+                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
                                   {b.payout > 0 && <div style={{ fontSize: 11, color: "#10b981", marginTop: 4 }}>Net: +${(b.payout - b.stake).toFixed(2)}</div>}
                                 </div>
                               )}
 
-                              <button onClick={() => deleteBet(b.id)} style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer", alignSelf: "flex-start", marginTop: 2 }}>
-                                Delete
-                              </button>
+                              {/* Save + Delete */}
+                              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                                <button onClick={() => saveEdits()} style={{ flex: 1, background: "#0f172a", color: "#fff", border: "none", borderRadius: 7, padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                                  Save Changes
+                                </button>
+                                <button onClick={() => deleteBet(b.id)} style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 7, padding: "8px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
+                                  Delete
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
