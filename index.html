@@ -57,7 +57,7 @@
       "1st Goal Scorer","Which Half Has More Goals","Halftime Points","Double Chance","Outright","Other",
     ];
 
-    const EMPTY_FORM = { match:"", date:"", betType:"1X2", selection:"", odds:"", stake:"", payout:"", status:"Pending" };
+    const EMPTY_FORM = { match:"", date:"", betType:"1X2", selection:"", odds:"", stake:"", payout:"", status:"Pending", betCategory:"Single", parlayLabel:"", parlayLegs:[{ match:"", selection:"", betType:"1X2", odds:"" }] };
 
     const todayStr = () => new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" });
 
@@ -233,7 +233,19 @@
           }
         }
 
-        setAllResults(allBets.map(b => ({ ...b, status: b.status || "Pending" })));
+        // Auto-calculate combined odds for parlays from leg odds
+        const enriched = allBets.map(b => {
+          if (b.betCategory === "Parlay" && !b.combinedOdds && (b.legs||[]).length > 0) {
+            const legOdds = (b.legs || []).map(l => Number(l.odds)).filter(o => o > 0);
+            if (legOdds.length === b.legs.length) {
+              const combined = legOdds.reduce((acc, o) => acc * o, 1);
+              return { ...b, combinedOdds: Math.round(combined * 100) / 100 };
+            }
+          }
+          return b;
+        });
+
+        setAllResults(enriched.map(b => ({ ...b, status: b.status || "Pending" })));
         setScanning(false);
       };
 
@@ -243,17 +255,41 @@
 
       const confirmBets = () => {
         if (!allResults) return;
-        const newBets = allResults.map(b => ({
-          id: Date.now() + Math.random(),
-          match: b.match || "Unknown Match",
-          date: b.date || todayStr(),
-          betType: BET_TYPES.includes(b.betType) ? b.betType : "Other",
-          selection: b.selection || "",
-          odds: b.odds ? Number(b.odds) : null,
-          stake: Number(b.stake) || 0,
-          payout: Number(b.payout) || 0,
-          status: b.status || "Pending",
-        }));
+        const newBets = allResults.map(b => {
+          if (b.betCategory === "Parlay") {
+            return {
+              id: Date.now() + Math.random(),
+              betCategory: "Parlay",
+              parlayLabel: b.parlayLabel || "",
+              date: b.date || todayStr(),
+              combinedOdds: b.combinedOdds ? Number(b.combinedOdds) : null,
+              stake: Number(b.stake) || 0,
+              payout: Number(b.payout) || 0,
+              status: b.status || "Pending",
+              legs: (b.legs || []).map(l => ({
+                match: l.match || "",
+                date: l.date || "",
+                betType: BET_TYPES.includes(l.betType) ? l.betType : "Other",
+                selection: l.selection || "",
+                odds: l.odds ? Number(l.odds) : null,
+                legStatus: l.legStatus || "Pending",
+              })),
+            };
+          }
+          return {
+            id: Date.now() + Math.random(),
+            betCategory: "Single",
+            parlayLabel: "",
+            match: b.match || "Unknown Match",
+            date: b.date || todayStr(),
+            betType: BET_TYPES.includes(b.betType) ? b.betType : "Other",
+            selection: b.selection || "",
+            odds: b.odds ? Number(b.odds) : null,
+            stake: Number(b.stake) || 0,
+            payout: Number(b.payout) || 0,
+            status: b.status || "Pending",
+          };
+        });
         onBetsScanned(newBets);
         setConfirmed(true);
         setTimeout(() => setTab("history"), 1500);
@@ -396,52 +432,86 @@
               ) : (
                 <>
                   <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
-                    ✅ Found {totalFound} bet{totalFound !== 1 ? "s" : ""} — edit then save
+                    ✅ Found {totalFound} bet{totalFound !== 1 ? "s" : ""} — review then save
                   </div>
-                  <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>Tap any field to change before saving.</div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>Tap status or fields to edit before saving.</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
                     {allResults.map((b, i) => (
-                      <div key={i} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
-                        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{b.match || "Unknown Match"}</div>
-                        <div style={{ marginBottom: 10 }}>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                            {["Pending","Win","Loss","Void"].map(s => {
-                              const sc = STATUS_COLORS[s];
-                              const active = (b.status || "Pending") === s;
-                              return (
-                                <button key={s} onClick={() => updateResult(i, "status", s)} style={{
-                                  padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                  border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
-                                  background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
-                                }}>{s}</button>
-                              );
-                            })}
+                      <div key={i} style={{ background: "#fff", border: b.betCategory === "Parlay" ? "1px solid #c4b5fd" : "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
+
+                        {/* Card header */}
+                        <div style={{ padding: "12px 14px", borderBottom: "1px solid #f3f4f6" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                            {b.betCategory === "Parlay"
+                              ? <span style={{ fontSize: 10, fontWeight: 700, background: "#ede9fe", color: "#7c3aed", borderRadius: 4, padding: "2px 7px" }}>🔗 PARLAY · {(b.legs||[]).length} LEGS</span>
+                              : <span style={{ fontSize: 10, fontWeight: 700, background: "#f0fdf4", color: "#166534", borderRadius: 4, padding: "2px 7px" }}>⚽ SINGLE</span>
+                            }
                           </div>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>
+                            {b.betCategory === "Parlay"
+                              ? (b.parlayLabel || (b.legs||[]).map(l=>l.match).join(" + ") || "Parlay Bet")
+                              : (b.match || "Unknown Match")}
+                          </div>
+                          {b.date && <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>📅 {b.date}</div>}
                         </div>
-                        <div style={{ display: "flex", gap: 8, marginBottom: (b.status || "Pending") === "Win" ? 8 : 0 }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
-                            <input type="number" value={b.stake || ""} onChange={e => updateResult(i, "stake", e.target.value)} placeholder="0.00"
-                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>ODDS</div>
-                            <input type="number" value={b.odds || ""} onChange={e => updateResult(i, "odds", e.target.value)} placeholder="e.g. 1.85"
-                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
-                          </div>
-                        </div>
-                        {(b.status || "Pending") === "Win" && (
-                          <div>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
-                            <input type="number" value={b.payout || ""} onChange={e => updateResult(i, "payout", e.target.value)} placeholder="e.g. 18.50"
-                              style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+
+                        {/* Parlay legs */}
+                        {b.betCategory === "Parlay" && (b.legs||[]).length > 0 && (
+                          <div style={{ background: "#faf5ff", borderBottom: "1px solid #f3f4f6" }}>
+                            {(b.legs||[]).map((leg, li) => (
+                              <div key={li} style={{ padding: "8px 14px", borderBottom: li < b.legs.length-1 ? "1px solid #ede9fe" : "none", fontSize: 12 }}>
+                                <div style={{ fontWeight: 600, color: "#111827" }}>{leg.match}</div>
+                                <div style={{ color: "#6b7280", marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                  <span>☑️ {leg.selection}</span>
+                                  <span>🎯 {leg.betType}</span>
+                                  {leg.odds && <span>@ {leg.odds}</span>}
+                                </div>
+                              </div>
+                            ))}
                           </div>
                         )}
-                        <div style={{ fontSize: 11, color: "#9ca3af", display: "flex", flexWrap: "wrap", gap: "3px 12px", marginTop: 8 }}>
-                          {b.date && <span>📅 {b.date}</span>}
-                          <span>🎯 {b.betType}</span>
-                          {b.selection && <span>☑️ {b.selection}</span>}
+
+                        {/* Editable fields */}
+                        <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+                          {/* Status */}
+                          <div>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {["Pending","Win","Loss","Void"].map(s => {
+                                const sc = STATUS_COLORS[s];
+                                const active = (b.status || "Pending") === s;
+                                return (
+                                  <button key={s} onClick={() => updateResult(i, "status", s)} style={{
+                                    padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                    border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
+                                    background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
+                                  }}>{s}</button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          {/* Stake + Odds */}
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
+                              <input type="number" value={b.stake || ""} onChange={e => updateResult(i, "stake", e.target.value)} placeholder="0.00"
+                                style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>{b.betCategory === "Parlay" ? "COMBINED ODDS" : "ODDS"}</div>
+                              <input type="number" value={(b.betCategory === "Parlay" ? b.combinedOdds : b.odds) || ""} placeholder="e.g. 1.85"
+                                onChange={e => updateResult(i, b.betCategory === "Parlay" ? "combinedOdds" : "odds", e.target.value)}
+                                style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                            </div>
+                          </div>
+                          {/* Payout if Win */}
+                          {(b.status || "Pending") === "Win" && (
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
+                              <input type="number" value={b.payout || ""} onChange={e => updateResult(i, "payout", e.target.value)} placeholder="e.g. 18.50"
+                                style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -491,11 +561,33 @@
         setFormError("");
         const newBet = {
           id: Date.now() + Math.random(),
-          match: form.match.trim(), date: form.date.trim() || todayStr(),
-          betType: form.betType, selection: form.selection.trim(),
-          odds: form.odds ? Number(form.odds) : null,
-          stake: Number(form.stake), payout: form.payout ? Number(form.payout) : 0,
-          status: form.status,
+          betCategory: form.betCategory || "Single",
+          ...(form.betCategory === "Parlay" ? {
+            parlayLabel: form.parlayLabel.trim(),
+            date: form.date.trim() || todayStr(),
+            combinedOdds: form.odds ? Number(form.odds) : null,
+            stake: Number(form.stake),
+            payout: form.payout ? Number(form.payout) : 0,
+            status: form.status,
+            legs: (form.parlayLegs || []).map(l => ({
+              match: l.match.trim(),
+              date: "",
+              betType: BET_TYPES.includes(l.betType) ? l.betType : "Other",
+              selection: l.selection.trim(),
+              odds: l.odds ? Number(l.odds) : null,
+              legStatus: "Pending",
+            })),
+          } : {
+            parlayLabel: "",
+            match: form.match.trim(),
+            date: form.date.trim() || todayStr(),
+            betType: form.betType,
+            selection: form.selection.trim(),
+            odds: form.odds ? Number(form.odds) : null,
+            stake: Number(form.stake),
+            payout: form.payout ? Number(form.payout) : 0,
+            status: form.status,
+          }),
         };
         setBets(prev => { const next = [newBet, ...prev]; saveBets(next); return next; });
         setForm(EMPTY_FORM); setSaved(true);
@@ -579,6 +671,7 @@
             {tab === "dashboard" && (
               <div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+                  <StatCard label="Total Staked" value={`$${bets.reduce((s,b)=>s+b.stake,0).toFixed(2)}`} sub={`${bets.length} bet${bets.length !== 1 ? "s" : ""} placed`} />
                   <StatCard label="Net P&L" value={`${netPnL >= 0 ? "+" : ""}$${Math.abs(netPnL).toFixed(2)}`} sub={`${settled.length} settled`} accent={settled.length ? pnlColor : "#9ca3af"} />
                   <StatCard label="Win Rate" value={winRate === "—" ? "—" : `${winRate}%`} sub={`${wins.length}W · ${losses.length}L`} />
                   <StatCard label="ROI" value={`${roi}%`} sub="on settled bets" accent={Number(roi) >= 0 ? "#10b981" : "#ef4444"} />
@@ -638,14 +731,72 @@
                 <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Log a Bet</div>
                 <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>Fill in your bet details from your Singapore Pools slip.</div>
                 <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "18px 16px" }}>
-                  <Field label="Match" value={form.match} onChange={setField("match")} placeholder="e.g. Man Utd vs Liverpool" required />
-                  <Field label="Date" value={form.date} onChange={setField("date")} placeholder={todayStr()} />
-                  <DropDown label="Bet Type" value={form.betType} onChange={setField("betType")} options={BET_TYPES} />
-                  <Field label="Selection" value={form.selection} onChange={setField("selection")} placeholder="e.g. Man Utd, Over 2.5, Home Win" />
-                  <div style={{ display: "flex", gap: 12 }}>
-                    <div style={{ flex: 1 }}><Field label="Odds" value={form.odds} onChange={setField("odds")} type="number" placeholder="e.g. 1.85" /></div>
-                    <div style={{ flex: 1 }}><Field label="Stake ($)" value={form.stake} onChange={setField("stake")} type="number" placeholder="e.g. 10.00" required /></div>
+
+                  {/* Single / Parlay toggle */}
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>BET TYPE</label>
+                    <div style={{ display: "flex", background: "#f3f4f6", borderRadius: 8, padding: 3, gap: 3 }}>
+                      {["Single", "Parlay"].map(cat => (
+                        <button key={cat} onClick={() => setForm(f => ({ ...f, betCategory: cat, parlayLegs: cat === "Parlay" ? (f.parlayLegs || [{ match:"", selection:"", betType:"1X2", odds:"" }]) : f.parlayLegs }))} style={{
+                          flex: 1, padding: "7px", borderRadius: 6, border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                          background: form.betCategory === cat ? "#fff" : "transparent",
+                          color: form.betCategory === cat ? "#111827" : "#6b7280",
+                          boxShadow: form.betCategory === cat ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                          transition: "all 0.15s",
+                        }}>{cat === "Single" ? "⚽ Single" : "🔗 Parlay"}</button>
+                      ))}
+                    </div>
                   </div>
+
+                  {form.betCategory === "Single" ? (
+                    <>
+                      <Field label="Match" value={form.match} onChange={setField("match")} placeholder="e.g. Man Utd vs Liverpool" required />
+                      <Field label="Date" value={form.date} onChange={setField("date")} placeholder={todayStr()} />
+                      <DropDown label="Bet Type" value={form.betType} onChange={setField("betType")} options={BET_TYPES} />
+                      <Field label="Selection" value={form.selection} onChange={setField("selection")} placeholder="e.g. Man Utd, Over 2.5, Home Win" />
+                      <div style={{ display: "flex", gap: 12 }}>
+                        <div style={{ flex: 1 }}><Field label="Odds" value={form.odds} onChange={setField("odds")} type="number" placeholder="e.g. 1.85" /></div>
+                        <div style={{ flex: 1 }}><Field label="Stake ($)" value={form.stake} onChange={setField("stake")} type="number" placeholder="e.g. 10.00" required /></div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Field label="Parlay Name (optional)" value={form.parlayLabel} onChange={setField("parlayLabel")} placeholder="e.g. Weekend Combo" />
+                      <Field label="Date" value={form.date} onChange={setField("date")} placeholder={todayStr()} />
+
+                      {/* Legs */}
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 8 }}>LEGS <span style={{ color: "#ef4444" }}>*</span></label>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          {(form.parlayLegs || [{ match:"", selection:"", betType:"1X2", odds:"" }]).map((leg, li) => (
+                            <div key={li} style={{ background: "#faf5ff", border: "1px solid #e9d5ff", borderRadius: 9, padding: "10px 12px" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                                <span style={{ fontSize: 11, fontWeight: 700, color: "#7c3aed" }}>LEG {li + 1}</span>
+                                {(form.parlayLegs||[]).length > 1 && (
+                                  <button onClick={() => setForm(f => ({ ...f, parlayLegs: f.parlayLegs.filter((_,i)=>i!==li) }))}
+                                    style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 14 }}>✕</button>
+                                )}
+                              </div>
+                              <Field label="Match" value={leg.match} onChange={v => setForm(f => ({ ...f, parlayLegs: f.parlayLegs.map((l,i)=>i===li?{...l,match:v}:l) }))} placeholder="e.g. Man Utd vs Liverpool" />
+                              <DropDown label="Bet Type" value={leg.betType} onChange={v => setForm(f => ({ ...f, parlayLegs: f.parlayLegs.map((l,i)=>i===li?{...l,betType:v}:l) }))} options={BET_TYPES} />
+                              <Field label="Selection" value={leg.selection} onChange={v => setForm(f => ({ ...f, parlayLegs: f.parlayLegs.map((l,i)=>i===li?{...l,selection:v}:l) }))} placeholder="e.g. Home Win" />
+                              <Field label="Odds" value={leg.odds} onChange={v => setForm(f => ({ ...f, parlayLegs: f.parlayLegs.map((l,i)=>i===li?{...l,odds:v}:l) }))} type="number" placeholder="e.g. 1.85" />
+                            </div>
+                          ))}
+                        </div>
+                        <button onClick={() => setForm(f => ({ ...f, parlayLegs: [...(f.parlayLegs||[]), { match:"", selection:"", betType:"1X2", odds:"" }] }))}
+                          style={{ marginTop: 8, width: "100%", background: "#fff", border: "1px dashed #c4b5fd", color: "#7c3aed", borderRadius: 8, padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                          + Add Leg
+                        </button>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 12 }}>
+                        <div style={{ flex: 1 }}><Field label="Combined Odds" value={form.odds} onChange={setField("odds")} type="number" placeholder="e.g. 5.40" /></div>
+                        <div style={{ flex: 1 }}><Field label="Stake ($)" value={form.stake} onChange={setField("stake")} type="number" placeholder="e.g. 10.00" required /></div>
+                      </div>
+                    </>
+                  )}
+
                   <DropDown label="Status" value={form.status} onChange={setField("status")} options={["Pending","Win","Loss","Void"]} />
                   {form.status === "Win" && (
                     <Field label="Payout ($)" value={form.payout} onChange={setField("payout")} type="number" placeholder="Total payout received" />
@@ -677,125 +828,198 @@
                   </div>
                 </div>
 
-                {filteredBets.length === 0 ? (
-                  <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "32px 16px", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                    No {filterStatus !== "All" ? filterStatus.toLowerCase() + " " : ""}bets yet
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {filteredBets.map(b => {
-                      const pnl = b.status === "Win" ? b.payout - b.stake : b.status === "Loss" ? -b.stake : null;
-                      const isOpen = expandedId === b.id;
+                {(() => {
+                  const singles = filteredBets.filter(b => !b.betCategory || b.betCategory === "Single");
+                  const parlays = filteredBets.filter(b => b.betCategory === "Parlay");
 
-                      // draft values for editing
-                      const draftStake  = getEdit(b.id, "stake",  String(b.stake));
-                      const draftOdds   = getEdit(b.id, "odds",   b.odds != null ? String(b.odds) : "");
-                      const draftPayout = getEdit(b.id, "payout", b.payout > 0 ? String(b.payout) : "");
+                  const BetCard = (b) => {
+                    const isParlay = b.betCategory === "Parlay";
+                    const pnl = b.status === "Win" ? b.payout - b.stake : b.status === "Loss" ? -b.stake : null;
+                    const isOpen = expandedId === b.id;
+                    const draftStake  = getEdit(b.id, "stake",  String(b.stake));
+                    const draftOdds   = getEdit(b.id, "odds",   (isParlay ? b.combinedOdds : b.odds) != null ? String(isParlay ? b.combinedOdds : b.odds) : "");
+                    const draftPayout = getEdit(b.id, "payout", b.payout > 0 ? String(b.payout) : "");
 
-                      const saveEdits = (newStatus) => {
-                        updateBet(b.id, {
-                          status: newStatus ?? b.status,
-                          stake:  Number(draftStake)  || b.stake,
-                          odds:   draftOdds ? Number(draftOdds) : null,
-                          payout: Number(draftPayout) || 0,
-                        });
-                        clearEdits(b.id);
-                      };
-
-                      return (
-                        <div key={b.id} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
-                          {/* Row header */}
-                          <div onClick={() => { setExpandedId(isOpen ? null : b.id); if (isOpen) clearEdits(b.id); }}
-                            style={{ padding: "12px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.match}</div>
-                              <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 2 }}>{b.date} · {b.betType}</div>
+                    // Auto-calculate payout when stake and odds are both filled
+                    const autoPayout = (Number(draftStake) > 0 && Number(draftOdds) > 0)
+                      ? Math.round(Number(draftStake) * Number(draftOdds) * 100) / 100
+                      : null;
+                    const displayPayout = draftPayout !== "" ? draftPayout : (autoPayout !== null ? String(autoPayout) : "");
+                    const netProfit = Number(displayPayout) > 0 ? Number(displayPayout) - Number(draftStake) : null;
+                    const saveEdits = (newStatus) => {
+                      const oddsField = isParlay ? "combinedOdds" : "odds";
+                      updateBet(b.id, {
+                        status: newStatus ?? b.status,
+                        stake:  Number(draftStake) || b.stake,
+                        [oddsField]: draftOdds ? Number(draftOdds) : null,
+                        payout: Number(displayPayout) || 0,
+                      });
+                      clearEdits(b.id);
+                    };
+                    const legStatusColor = { Win: "#10b981", Loss: "#ef4444", Void: "#9ca3af", Pending: "#f59e0b" };
+                    return (
+                      <div key={b.id} style={{ background: "#fff", border: isParlay ? "1px solid #c4b5fd" : "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
+                        {/* Row header */}
+                        <div onClick={() => { setExpandedId(isOpen ? null : b.id); if (isOpen) clearEdits(b.id); }}
+                          style={{ padding: "12px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                              {isParlay && <span style={{ fontSize: 10, fontWeight: 700, background: "#ede9fe", color: "#7c3aed", borderRadius: 4, padding: "1px 6px", flexShrink: 0 }}>🔗 PARLAY</span>}
+                              <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {isParlay ? (b.parlayLabel || `${(b.legs||[]).length}-leg Parlay`) : b.match}
+                              </div>
                             </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                              {pnl !== null && (
-                                <span style={{ fontWeight: 700, fontSize: 13, color: pnl >= 0 ? "#10b981" : "#ef4444" }}>
-                                  {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                            <div style={{ color: "#9ca3af", fontSize: 11, marginTop: 1 }}>{b.date}{!isParlay ? ` · ${b.betType}` : ""}</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                            {pnl !== null && (
+                              <span style={{ fontWeight: 700, fontSize: 13, color: pnl >= 0 ? "#10b981" : "#ef4444" }}>
+                                {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                              </span>
+                            )}
+                            <StatusBadge status={b.status} />
+                          </div>
+                        </div>
+
+                        {/* Parlay legs — always shown for parlays */}
+                        {isParlay && (b.legs||[]).length > 0 && (
+                          <div style={{ background: "#faf5ff", borderTop: "1px solid #ede9fe", borderBottom: isOpen ? "1px solid #ede9fe" : "none" }}>
+                            {(b.legs||[]).map((leg, li) => (
+                              <div key={li} style={{ padding: "8px 14px", borderBottom: li < b.legs.length-1 ? "1px solid #ede9fe" : "none", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{leg.match}</div>
+                                  <div style={{ color: "#6b7280", marginTop: 2, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                    <span>☑️ {leg.selection}</span>
+                                    <span>🎯 {leg.betType}</span>
+                                    {leg.odds && <span>@ {leg.odds}</span>}
+                                  </div>
+                                </div>
+                                <span style={{ fontSize: 11, fontWeight: 700, color: legStatusColor[leg.legStatus||"Pending"], flexShrink: 0 }}>
+                                  {leg.legStatus || "Pending"}
                                 </span>
-                              )}
-                              <StatusBadge status={b.status} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Expanded edit panel */}
+                        {isOpen && (
+                          <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", display: "flex", flexDirection: "column", gap: 10 }}>
+                            {!isParlay && b.selection && <div style={{ fontSize: 12, color: "#6b7280" }}>☑️ {b.selection}</div>}
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                {["Pending","Win","Loss","Void"].map(s => {
+                                  const sc = STATUS_COLORS[s];
+                                  const active = b.status === s;
+                                  return (
+                                    <button key={s} onClick={() => saveEdits(s)} style={{
+                                      padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                      border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
+                                      background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
+                                      transition: "all 0.15s",
+                                    }}>{s}</button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
+                                <input type="number" value={draftStake} onChange={e => setEdit(b.id, "stake", e.target.value)}
+                                  style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                              </div>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>{isParlay ? "COMBINED ODDS" : "ODDS"}</div>
+                                <input type="number" value={draftOdds} placeholder="—" onChange={e => setEdit(b.id, "odds", e.target.value)}
+                                  style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                              </div>
+                            </div>
+                            {b.status === "Win" && (
+                              <div>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>PAYOUT ($)</div>
+                                  {autoPayout !== null && draftPayout === "" && (
+                                    <span style={{ fontSize: 10, color: "#6366f1", fontWeight: 500 }}>Auto-calculated</span>
+                                  )}
+                                </div>
+                                <input type="number" value={displayPayout}
+                                  onChange={e => setEdit(b.id, "payout", e.target.value)}
+                                  placeholder="e.g. 18.50"
+                                  style={{ width: "100%", padding: "7px 10px", border: autoPayout !== null && draftPayout === "" ? "1px solid #a5b4fc" : "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: autoPayout !== null && draftPayout === "" ? "#eef2ff" : "#fff" }} />
+                                {netProfit !== null && (
+                                  <div style={{ fontSize: 11, color: "#10b981", marginTop: 4, fontWeight: 600 }}>
+                                    Net profit: +${netProfit.toFixed(2)}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                              <button onClick={() => saveEdits()} style={{ flex: 1, background: "#0f172a", color: "#fff", border: "none", borderRadius: 7, padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                                Save Changes
+                              </button>
+                              <button onClick={() => deleteBet(b.id)} style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 7, padding: "8px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
+                                Delete
+                              </button>
                             </div>
                           </div>
+                        )}
+                      </div>
+                    );
+                  };
 
-                          {/* Expanded edit panel */}
-                          {isOpen && (
-                            <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", display: "flex", flexDirection: "column", gap: 10 }}>
+                  const singlePnL  = singles.filter(b=>b.status==="Win").reduce((s,b)=>s+b.payout-b.stake,0) + singles.filter(b=>b.status==="Loss").reduce((s,b)=>s-b.stake,0);
+                  const parlayPnL  = parlays.filter(b=>b.status==="Win").reduce((s,b)=>s+b.payout-b.stake,0) + parlays.filter(b=>b.status==="Loss").reduce((s,b)=>s-b.stake,0);
 
-                              {b.selection && <div style={{ fontSize: 12, color: "#6b7280" }}>☑️ {b.selection}</div>}
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
-                              {/* Status buttons */}
-                              <div>
-                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
-                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                  {["Pending","Win","Loss","Void"].map(s => {
-                                    const sc = STATUS_COLORS[s];
-                                    const active = b.status === s;
-                                    return (
-                                      <button key={s} onClick={() => saveEdits(s)} style={{
-                                        padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                                        border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
-                                        background: active ? sc.bg : "#fff", color: active ? sc.text : "#6b7280",
-                                        transition: "all 0.15s",
-                                      }}>{s}</button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-
-                              {/* Stake + Odds row */}
-                              <div style={{ display: "flex", gap: 8 }}>
-                                <div style={{ flex: 1 }}>
-                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>STAKE ($)</div>
-                                  <input type="number" value={draftStake}
-                                    onChange={e => setEdit(b.id, "stake", e.target.value)}
-                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
-                                </div>
-                                <div style={{ flex: 1 }}>
-                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>ODDS</div>
-                                  <input type="number" value={draftOdds} placeholder="—"
-                                    onChange={e => setEdit(b.id, "odds", e.target.value)}
-                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
-                                </div>
-                              </div>
-
-                              {/* Payout — shown when Win */}
-                              {b.status === "Win" && (
-                                <div>
-                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
-                                  <input type="number" value={draftPayout} placeholder="e.g. 18.50"
-                                    onChange={e => setEdit(b.id, "payout", e.target.value)}
-                                    style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
-                                  {b.payout > 0 && <div style={{ fontSize: 11, color: "#10b981", marginTop: 4 }}>Net: +${(b.payout - b.stake).toFixed(2)}</div>}
-                                </div>
-                              )}
-
-                              {/* Save + Delete */}
-                              <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-                                <button onClick={() => saveEdits()} style={{ flex: 1, background: "#0f172a", color: "#fff", border: "none", borderRadius: 7, padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-                                  Save Changes
-                                </button>
-                                <button onClick={() => deleteBet(b.id)} style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 7, padding: "8px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
-                                  Delete
-                                </button>
-                              </div>
-                            </div>
-                          )}
+                      {/* Singles section */}
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                          <span style={{ fontSize: 15, fontWeight: 700 }}>⚽ Singles</span>
+                          <span style={{ fontSize: 12, color: "#6b7280" }}>{singles.length} bet{singles.length !== 1 ? "s" : ""}</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        {singles.length === 0 ? (
+                          <div style={{ background: "#fff", border: "1px dashed #e5e7eb", borderRadius: 10, padding: "20px", textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                            No single bets {filterStatus !== "All" ? `with status "${filterStatus}"` : "yet"}
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {singles.map(b => BetCard(b))}
+                          </div>
+                        )}
+                      </div>
 
-                {bets.length > 0 && (
-                  <button onClick={() => { if (window.confirm("Clear all bets? This cannot be undone.")) { setBets([]); saveBets([]); } }}
-                    style={{ marginTop: 16, background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 8, padding: "7px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
-                    Clear all
-                  </button>
-                )}
+                      {/* Divider */}
+                      <div style={{ borderTop: "1px solid #e5e7eb" }} />
+
+                      {/* Parlays section */}
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                          <span style={{ fontSize: 15, fontWeight: 700 }}>🔗 Parlays</span>
+                          <span style={{ fontSize: 12, color: "#6b7280" }}>{parlays.length} bet{parlays.length !== 1 ? "s" : ""}</span>
+                        </div>
+                        {parlays.length === 0 ? (
+                          <div style={{ background: "#fff", border: "1px dashed #e5e7eb", borderRadius: 10, padding: "20px", textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                            No parlay bets {filterStatus !== "All" ? `with status "${filterStatus}"` : "yet"}
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {parlays.map(b => BetCard(b))}
+                          </div>
+                        )}
+                      </div>
+
+                      {bets.length > 0 && (
+                        <button onClick={() => { if (window.confirm("Clear all bets? This cannot be undone.")) { setBets([]); saveBets([]); } }}
+                          style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 8, padding: "7px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500, alignSelf: "flex-start" }}>
+                          Clear all
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
