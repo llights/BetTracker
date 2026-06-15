@@ -24,7 +24,7 @@
     const { useState, useCallback, useRef } = React;
 
     // ── CONFIG — paste your Cloudflare Worker URL here ─────────────────────────
-    const WORKER_URL = "https://bettracker.llianglengg.workers.dev/";
+    const WORKER_URL = "https://YOUR-WORKER.YOUR-NAME.workers.dev";
     // ───────────────────────────────────────────────────────────────────────────
 
     const STORAGE_KEY = "sgpools-bets-v2";
@@ -153,6 +153,11 @@
         }
       };
 
+      // Make results editable
+      const updateResult = (i, field, value) => {
+        setResults(prev => prev.map((b, idx) => idx === i ? { ...b, [field]: value } : b));
+      };
+
       const confirmBets = () => {
         if (!results) return;
         const newBets = results.map(b => ({
@@ -239,23 +244,59 @@
             </div>
           )}
 
-          {/* Results preview */}
+          {/* Results preview — editable */}
           {results && !confirmed && (
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 10 }}>
-                ✅ Found {results.length} bet{results.length !== 1 ? "s" : ""} — review before saving
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 4 }}>
+                ✅ Found {results.length} bet{results.length !== 1 ? "s" : ""} — edit then save
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>Tap any field to change it before saving.</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
                 {results.map((b, i) => (
                   <div key={i} style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px" }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{b.match || "Unknown Match"}</div>
-                    <div style={{ fontSize: 12, color: "#6b7280", display: "flex", flexWrap: "wrap", gap: "4px 14px" }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{b.match || "Unknown Match"}</div>
+
+                    {/* Status row */}
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>RESULT</div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {["Pending","Win","Loss","Void"].map(s => {
+                          const sc = STATUS_COLORS[s];
+                          const active = (b.status || "Pending") === s;
+                          return (
+                            <button key={s} onClick={() => updateResult(i, "status", s)} style={{
+                              padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                              border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
+                              background: active ? sc.bg : "#fff",
+                              color: active ? sc.text : "#6b7280",
+                              transition: "all 0.15s",
+                            }}>{s}</button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Payout field — only when Win */}
+                    {(b.status || "Pending") === "Win" && (
+                      <div style={{ marginBottom: 4 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>PAYOUT ($)</div>
+                        <input
+                          type="number"
+                          value={b.payout || ""}
+                          onChange={e => updateResult(i, "payout", e.target.value)}
+                          placeholder="e.g. 18.50"
+                          style={{ width: "100%", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, outline: "none", background: "#fff" }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Info row */}
+                    <div style={{ fontSize: 11, color: "#9ca3af", display: "flex", flexWrap: "wrap", gap: "3px 12px", marginTop: 8 }}>
                       {b.date && <span>📅 {b.date}</span>}
                       <span>🎯 {b.betType}</span>
                       {b.selection && <span>☑️ {b.selection}</span>}
                       {b.odds && <span>@ {b.odds}</span>}
                       <span>💵 ${Number(b.stake || 0).toFixed(2)}</span>
-                      {b.payout > 0 && <span>→ ${Number(b.payout).toFixed(2)}</span>}
                     </div>
                   </div>
                 ))}
@@ -292,6 +333,7 @@
       const [saved, setSaved]             = useState(false);
       const [filterStatus, setFilterStatus] = useState("All");
       const [expandedId, setExpandedId]   = useState(null);
+      const [editPayout, setEditPayout]   = useState({});  // { [id]: string }
 
       const setField = k => v => setForm(f => ({ ...f, [k]: v }));
       const todayStr = () => new Date().toLocaleDateString("en-SG", { day:"2-digit", month:"short", year:"numeric" });
@@ -316,6 +358,14 @@
 
       const deleteBet = useCallback(id => {
         setBets(prev => { const next = prev.filter(b => b.id !== id); saveBets(next); return next; });
+      }, []);
+
+      const updateBetStatus = useCallback((id, status, payout) => {
+        setBets(prev => {
+          const next = prev.map(b => b.id === id ? { ...b, status, payout: payout !== undefined ? Number(payout) || 0 : b.payout } : b);
+          saveBets(next);
+          return next;
+        });
       }, []);
 
       const handleBetsScanned = useCallback(newBets => {
@@ -503,11 +553,60 @@
                             </div>
                           </div>
                           {isOpen && (
-                            <div style={{ borderTop: "1px solid #f3f4f6", padding: "10px 14px", background: "#f9fafb", fontSize: 12, display: "flex", flexDirection: "column", gap: 5 }}>
-                              {b.selection && <div><span style={{ color: "#6b7280" }}>Selection: </span>{b.selection}</div>}
-                              <div><span style={{ color: "#6b7280" }}>Stake: </span>${b.stake.toFixed(2)}{b.odds ? ` @ ${b.odds}` : ""}</div>
-                              {b.status === "Win" && <div><span style={{ color: "#6b7280" }}>Payout: </span>${b.payout.toFixed(2)}</div>}
-                              <button onClick={() => deleteBet(b.id)} style={{ marginTop: 6, background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer", alignSelf: "flex-start" }}>
+                            <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                              {/* Details */}
+                              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "#6b7280" }}>
+                                {b.selection && <span>☑️ {b.selection}</span>}
+                                <span>Stake: <strong style={{ color: "#111827" }}>${b.stake.toFixed(2)}</strong>{b.odds ? ` @ ${b.odds}` : ""}</span>
+                              </div>
+
+                              {/* Status editor */}
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>UPDATE RESULT</div>
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                  {["Pending","Win","Loss","Void"].map(s => {
+                                    const sc = STATUS_COLORS[s];
+                                    const active = b.status === s;
+                                    return (
+                                      <button key={s} onClick={() => {
+                                        const p = s === "Win" ? (editPayout[b.id] ?? (b.payout > 0 ? b.payout : "")) : b.payout;
+                                        updateBetStatus(b.id, s, p);
+                                      }} style={{
+                                        padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                        border: active ? "2px solid " + sc.dot : "2px solid #e5e7eb",
+                                        background: active ? sc.bg : "#fff",
+                                        color: active ? sc.text : "#6b7280",
+                                        transition: "all 0.15s",
+                                      }}>{s}</button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              {/* Payout input when Win */}
+                              {b.status === "Win" && (
+                                <div>
+                                  <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>PAYOUT ($)</div>
+                                  <div style={{ display: "flex", gap: 8 }}>
+                                    <input
+                                      type="number"
+                                      value={editPayout[b.id] !== undefined ? editPayout[b.id] : (b.payout > 0 ? b.payout : "")}
+                                      onChange={e => setEditPayout(p => ({ ...p, [b.id]: e.target.value }))}
+                                      placeholder="e.g. 18.50"
+                                      style={{ flex: 1, padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, outline: "none", background: "#fff" }}
+                                    />
+                                    <button onClick={() => {
+                                      updateBetStatus(b.id, "Win", editPayout[b.id] ?? b.payout);
+                                      setEditPayout(p => { const n = {...p}; delete n[b.id]; return n; });
+                                    }} style={{ padding: "7px 14px", background: "#0f172a", color: "#fff", border: "none", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                                      Save
+                                    </button>
+                                  </div>
+                                  {b.payout > 0 && <div style={{ fontSize: 11, color: "#10b981", marginTop: 4 }}>Net: +${(b.payout - b.stake).toFixed(2)}</div>}
+                                </div>
+                              )}
+
+                              <button onClick={() => deleteBet(b.id)} style={{ background: "none", border: "1px solid #fca5a5", color: "#dc2626", borderRadius: 6, padding: "5px 10px", fontSize: 11, cursor: "pointer", alignSelf: "flex-start", marginTop: 2 }}>
                                 Delete
                               </button>
                             </div>
