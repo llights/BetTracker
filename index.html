@@ -42,6 +42,23 @@
     const loadBets = () => { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
     const saveBets = (b) => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} };
 
+    // Duplicate detection — match on match name + betType + date (fuzzy)
+    const findDuplicates = (newBets, existingBets) => {
+      const normalize = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+      return newBets.map(nb => {
+        const nbMatch   = normalize(nb.betCategory === "Parlay" ? (nb.parlayLabel || "parlay") : nb.match);
+        const nbBetType = normalize(nb.betType || "");
+        const nbDate    = normalize(nb.date || "");
+        const dup = existingBets.find(eb => {
+          const ebMatch   = normalize(eb.betCategory === "Parlay" ? (eb.parlayLabel || "parlay") : eb.match);
+          const ebBetType = normalize(eb.betType || "");
+          const ebDate    = normalize(eb.date || "");
+          return ebMatch === nbMatch && ebBetType === nbBetType && (ebDate === nbDate || !nbDate || !ebDate);
+        });
+        return dup ? nb.id || JSON.stringify(nb) : null;
+      }).filter(Boolean);
+    };
+
     const STATUS_COLORS = {
       Win:     { bg: "#d1fae5", text: "#065f46", dot: "#10b981" },
       Loss:    { bg: "#fee2e2", text: "#991b1b", dot: "#ef4444" },
@@ -206,7 +223,7 @@
 
     // ── Scan Tab ───────────────────────────────────────────────────────────────
 
-    function ScanTab({ onBetsScanned, setTab }) {
+    function ScanTab({ onBetsScanned, setTab, existingBets }) {
       // mode: "image" | "pdf"
       const [mode, setMode]           = useState("image");
       // image queue items: { dataUrl, base64, mediaType, name, status, bets, error }
@@ -216,10 +233,32 @@
       const [scanning, setScanning]   = useState(false);
       const [allResults, setAllResults] = useState(null);
       const [confirmed, setConfirmed] = useState(false);
+      const [dupWarning, setDupWarning] = useState([]);  // array of duplicate match names
       const imgInputRef = useRef();
       const pdfInputRef = useRef();
 
       const reset = () => { setImages([]); setPdfs([]); setAllResults(null); setConfirmed(false); };
+
+      const retryFailed = async () => {
+        const failedIdxs = images.map((img, i) => img.status === "error" ? i : null).filter(i => i !== null);
+        if (!failedIdxs.length) return;
+        setScanning(true);
+        const retryResults = await Promise.all(failedIdxs.map(async idx => {
+          setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "scanning", error: "" } : m));
+          try {
+            const bets = await scanSingleImage(images[idx]);
+            setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "done", bets } : m));
+            return bets;
+          } catch (err) {
+            setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "error", error: err.message } : m));
+            return [];
+          }
+        }));
+        // Merge new results into existing allResults
+        const newBets = retryResults.flat().map(b => ({ ...b, status: b.status || "Pending" }));
+        setAllResults(prev => prev ? [...prev, ...newBets] : newBets);
+        setScanning(false);
+      };
 
       // ── Image handlers ──
       const addImageFiles = async (files) => {
@@ -304,7 +343,7 @@
         setAllResults(prev => prev.map((b, idx) => idx === i ? { ...b, [field]: value } : b));
       };
 
-      const confirmBets = () => {
+      const confirmBets = (force = false) => {
         if (!allResults) return;
         const newBets = allResults.map(b => {
           if (b.betCategory === "Parlay") {
@@ -341,6 +380,27 @@
             status: b.status || "Pending",
           };
         });
+
+        // Duplicate check
+        if (!force) {
+          const normalize = s => (s || "").toLowerCase().trim();
+          const dups = newBets.filter(nb => {
+            const nbKey = normalize(nb.betCategory === "Parlay" ? (nb.parlayLabel || "parlay") : nb.match);
+            const nbType = normalize(nb.betType || "");
+            const nbDate = normalize(nb.date || "");
+            return (existingBets || []).some(eb => {
+              const ebKey = normalize(eb.betCategory === "Parlay" ? (eb.parlayLabel || "parlay") : eb.match);
+              return ebKey === nbKey && normalize(eb.betType || "") === nbType &&
+                (!nbDate || !normalize(eb.date || "") || normalize(eb.date || "") === nbDate);
+            });
+          });
+          if (dups.length > 0) {
+            setDupWarning(dups.map(d => d.betCategory === "Parlay" ? (d.parlayLabel || "Parlay") : d.match));
+            return;
+          }
+        }
+
+        setDupWarning([]);
         onBetsScanned(newBets);
         setConfirmed(true);
         setTimeout(() => setTab("history"), 1500);
@@ -466,10 +526,44 @@
             </button>
           )}
 
-          {/* Error summary */}
+          {/* Error summary + retry */}
           {allResults && errorCount > 0 && (
-            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#c2410c", marginBottom: 12 }}>
-              ⚠️ {errorCount} file{errorCount !== 1 ? "s" : ""} failed. Results below are from the rest.
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#c2410c", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>⚠️ {errorCount} file{errorCount !== 1 ? "s" : ""} failed.</span>
+              <button onClick={retryFailed} disabled={scanning} style={{ background: "#fff7ed", border: "1px solid #fed7aa", color: "#c2410c", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                🔄 Retry
+              </button>
+            </div>
+          )}
+
+          {/* Show retry button even before results if some failed */}
+          {!allResults && images.some(m => m.status === "error") && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#c2410c", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>⚠️ Some images failed to scan.</span>
+              <button onClick={retryFailed} disabled={scanning} style={{ background: "#fff7ed", border: "1px solid #fed7aa", color: "#c2410c", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                🔄 Retry Failed
+              </button>
+            </div>
+          )}
+
+          {/* Duplicate warning */}
+          {dupWarning.length > 0 && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fbbf24", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#92400e", marginBottom: 6 }}>⚠️ Possible duplicates detected</div>
+              <div style={{ fontSize: 12, color: "#92400e", marginBottom: 10 }}>
+                These bets may already exist in your history:
+                <ul style={{ marginTop: 6, paddingLeft: 16 }}>
+                  {dupWarning.map((name, i) => <li key={i}>{name}</li>)}
+                </ul>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setDupWarning([])} style={{ flex: 1, background: "#fff", border: "1px solid #d1d5db", borderRadius: 7, padding: "8px", fontSize: 13, cursor: "pointer", color: "#374151" }}>
+                  Cancel
+                </button>
+                <button onClick={() => confirmBets(true)} style={{ flex: 1, background: "#92400e", color: "#fff", border: "none", borderRadius: 7, padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  Save Anyway
+                </button>
+              </div>
             </div>
           )}
 
@@ -764,6 +858,46 @@
                   </div>
                 ) : (
                   <div>
+                    {/* Pending bets summary */}
+                    {pending.length > 0 && (
+                      <div style={{ marginBottom: 20 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 10 }}>⏳ Pending Bets</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                          {pending.map(b => {
+                            const isParlay = b.betCategory === "Parlay";
+                            const label = isParlay ? (b.parlayLabel || `${(b.legs||[]).length}-leg Parlay`) : b.match;
+                            const sublabel = isParlay
+                              ? (b.legs||[]).map(l => l.match).join(" · ")
+                              : `${b.betType}${b.selection ? " · " + b.selection : ""}`;
+                            return (
+                              <div key={b.id} style={{ background: "#fff", border: "1px solid #fde68a", borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                                    {isParlay && <span style={{ fontSize: 10, fontWeight: 700, background: "#ede9fe", color: "#7c3aed", borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>PARLAY</span>}
+                                    <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>
+                                  </div>
+                                  <div style={{ fontSize: 11, color: "#9ca3af", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.date}{sublabel ? " · " + sublabel : ""}</div>
+                                </div>
+                                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                                  <div style={{ fontSize: 12, fontWeight: 600, color: "#111827" }}>${b.stake.toFixed(2)}</div>
+                                  {(isParlay ? b.combinedOdds : b.odds) && (
+                                    <div style={{ fontSize: 11, color: "#6b7280" }}>@ {isParlay ? b.combinedOdds : b.odds}</div>
+                                  )}
+                                  <div style={{ fontSize: 11, color: "#10b981", marginTop: 1 }}>
+                                    pot. ${((isParlay ? b.combinedOdds : b.odds) ? Math.round(b.stake * (isParlay ? b.combinedOdds : b.odds) * 100) / 100 : b.payout || 0).toFixed(2)}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ marginTop: 10, borderTop: "1px solid #e5e7eb", paddingTop: 8, display: "flex", justifyContent: "space-between", fontSize: 12, color: "#6b7280" }}>
+                          <span>{pending.length} bet{pending.length !== 1 ? "s" : ""} pending</span>
+                          <span>Total at risk: <strong style={{ color: "#111827" }}>${pending.reduce((s,b)=>s+b.stake,0).toFixed(2)}</strong></span>
+                        </div>
+                      </div>
+                    )}
+
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 10 }}>Recent Bets</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       {bets.slice(0, 5).map(b => {
@@ -797,7 +931,7 @@
             )}
 
             {/* SCAN */}
-            {tab === "scan" && <ScanTab onBetsScanned={handleBetsScanned} setTab={setTab} />}
+            {tab === "scan" && <ScanTab onBetsScanned={handleBetsScanned} setTab={setTab} existingBets={bets} />}
 
             {/* ADD BET */}
             {tab === "add" && (
@@ -952,6 +1086,7 @@
                         stake:  Number(draftStake) || b.stake,
                         [oddsField]: draftOdds ? Number(draftOdds) : null,
                         payout: Number(displayPayout) || 0,
+                        ...(!isParlay && { match: getEdit(b.id, "match", b.match) }),
                       });
                       clearEdits(b.id);
                     };
@@ -1005,6 +1140,17 @@
                         {isOpen && (
                           <div style={{ borderTop: "1px solid #f3f4f6", padding: "12px 14px", background: "#f9fafb", display: "flex", flexDirection: "column", gap: 10 }}>
                             {!isParlay && b.selection && <div style={{ fontSize: 12, color: "#6b7280" }}>☑️ {b.selection}</div>}
+
+                            {/* Edit match name — singles only */}
+                            {!isParlay && (
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>MATCH NAME</div>
+                                <input type="text"
+                                  value={getEdit(b.id, "match", b.match || "")}
+                                  onChange={e => setEdit(b.id, "match", e.target.value)}
+                                  style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                              </div>
+                            )}
                             <div>
                               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 5 }}>RESULT</div>
                               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
