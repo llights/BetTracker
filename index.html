@@ -1081,16 +1081,30 @@
                     const netProfit = Number(displayPayout) > 0 ? Number(displayPayout) - Number(draftStake) : null;
                     const saveEdits = (newStatus) => {
                       const oddsField = isParlay ? "combinedOdds" : "odds";
+                      const resolvedStatus = newStatus ?? b.status;
+
+                      // When parlay is settled, update leg statuses too
+                      let updatedLegs = b.legs;
+                      if (isParlay && b.legs && resolvedStatus !== "Pending") {
+                        updatedLegs = b.legs.map(l => ({
+                          ...l,
+                          legStatus: resolvedStatus === "Void" ? "Void"
+                            : resolvedStatus === "Win" ? "Win"
+                            : l.legStatus === "Pending" ? "Settled" : l.legStatus,
+                        }));
+                      }
+
                       updateBet(b.id, {
-                        status: newStatus ?? b.status,
+                        status: resolvedStatus,
                         stake:  Number(draftStake) || b.stake,
                         [oddsField]: draftOdds ? Number(draftOdds) : null,
                         payout: Number(displayPayout) || 0,
                         ...(!isParlay && { match: getEdit(b.id, "match", b.match) }),
+                        ...(isParlay && { legs: updatedLegs }),
                       });
                       clearEdits(b.id);
                     };
-                    const legStatusColor = { Win: "#10b981", Loss: "#ef4444", Void: "#9ca3af", Pending: "#f59e0b" };
+                    const legStatusColor = { Win: "#10b981", Loss: "#ef4444", Void: "#9ca3af", Pending: "#f59e0b", Settled: "#9ca3af" };
                     return (
                       <div key={b.id} style={{ background: "#fff", border: isParlay ? "1px solid #c4b5fd" : "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
                         {/* Row header */}
