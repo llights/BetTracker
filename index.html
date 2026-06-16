@@ -541,6 +541,23 @@
                               })}
                             </div>
                           </div>
+                          {/* Bet Type + Selection — singles only */}
+                          {b.betCategory !== "Parlay" && (
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>BET TYPE</div>
+                                <select value={b.betType || "Other"} onChange={e => updateResult(i, "betType", e.target.value)}
+                                  style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 12, background: "#fff", color: "#111827" }}>
+                                  {BET_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                              </div>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>SELECTION</div>
+                                <input type="text" value={b.selection || ""} onChange={e => updateResult(i, "selection", e.target.value)} placeholder="e.g. Belgium, Over 2.5"
+                                  style={{ width: "100%", padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, background: "#fff" }} />
+                              </div>
+                            </div>
+                          )}
                           {/* Stake + Odds */}
                           <div style={{ display: "flex", gap: 8 }}>
                             <div style={{ flex: 1 }}>
