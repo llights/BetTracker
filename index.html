@@ -39,8 +39,49 @@
     // ──────────────────────────────────────────────────────────────────────────
 
     const STORAGE_KEY = "sgpools-bets-v2";
+    const RATE_KEY    = "sgpools-rate-v1";
+    const RATE_LIMIT_PER_MIN = 30;   // Groq free tier: 30 req/min
+    const RATE_LIMIT_PER_DAY = 500;  // llama-4-scout: 500 req/day
+
     const loadBets = () => { try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
     const saveBets = (b) => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} };
+
+    // Rate limit tracker — stores timestamps of each scan request
+    const loadRate = () => { try { const r = localStorage.getItem(RATE_KEY); return r ? JSON.parse(r) : []; } catch { return []; } };
+    const saveRate = (ts) => { try { localStorage.setItem(RATE_KEY, JSON.stringify(ts)); } catch {} };
+
+    const getRateState = () => {
+      const now = Date.now();
+      const all = loadRate().filter(t => now - t < 24 * 60 * 60 * 1000); // keep last 24h
+      const lastMin = all.filter(t => now - t < 60 * 1000);
+      const usedToday = all.length;
+      const usedMin   = lastMin.length;
+      const minLimited = usedMin >= RATE_LIMIT_PER_MIN;
+      const dayLimited = usedToday >= RATE_LIMIT_PER_DAY;
+      // When will minute window reset?
+      const oldestInMin = lastMin.length > 0 ? Math.min(...lastMin) : null;
+      const minResetsIn = oldestInMin ? Math.max(0, 60 - Math.floor((now - oldestInMin) / 1000)) : 0;
+      // When will day reset? (midnight-ish: 24h from oldest today)
+      const oldestToday = all.length > 0 ? Math.min(...all) : null;
+      const dayResetsIn = oldestToday ? Math.max(0, Math.ceil((oldestToday + 24*60*60*1000 - now) / 1000)) : 0;
+      return { usedToday, usedMin, minLimited, dayLimited, minResetsIn, dayResetsIn, remaining: Math.max(0, RATE_LIMIT_PER_DAY - usedToday) };
+    };
+
+    const recordScan = (count = 1) => {
+      const now = Date.now();
+      const all = loadRate().filter(t => now - t < 24 * 60 * 60 * 1000);
+      const updated = [...all, ...Array(count).fill(now)];
+      saveRate(updated);
+    };
+
+    const fmtCountdown = (secs) => {
+      if (secs <= 0) return "now";
+      if (secs < 60) return `${secs}s`;
+      const m = Math.floor(secs / 60), s = secs % 60;
+      if (m < 60) return `${m}m ${s}s`;
+      const h = Math.floor(m / 60), rm = m % 60;
+      return `${h}h ${rm}m`;
+    };
 
     // Duplicate detection — match on match name + betType + date (fuzzy)
     const findDuplicates = (newBets, existingBets) => {
@@ -207,7 +248,7 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
-      return data.bets || [];
+      return { bets: data.bets || [], rateLimit: data.rateLimit || null };
     }
 
     async function scanPdfText(pdfText) {
@@ -218,7 +259,7 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
-      return data.bets || [];
+      return { bets: data.bets || [], rateLimit: data.rateLimit || null };
     }
 
     // ── Scan Tab ───────────────────────────────────────────────────────────────
@@ -233,16 +274,49 @@
       const [scanning, setScanning]   = useState(false);
       const [allResults, setAllResults] = useState(null);
       const [confirmed, setConfirmed] = useState(false);
-      const [dupWarning, setDupWarning] = useState([]);  // array of duplicate match names
+      const [dupWarning, setDupWarning] = useState([]);
+      const [rateState, setRateState] = useState(() => getRateState());
+      const [groqRate, setGroqRate]   = useState(null); // live data from Groq headers
       const imgInputRef = useRef();
       const pdfInputRef = useRef();
+
+      // Apply Groq's real rate limit data from response headers
+      const applyGroqRateLimit = (rl) => {
+        if (!rl) return;
+        setGroqRate(rl);
+        setRateState(getRateState()); // also refresh local estimate
+      };
+
+      // Refresh countdown every second when limited
+      React.useEffect(() => {
+        const isLimited = groqRate
+          ? (groqRate.remainingReqMin === 0 || groqRate.remainingReqDay === 0)
+          : (rateState.minLimited || rateState.dayLimited);
+        if (!isLimited) return;
+        const timer = setInterval(() => {
+          setRateState(getRateState());
+          setGroqRate(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              resetReqMinSecs: prev.resetReqMinSecs > 0 ? prev.resetReqMinSecs - 1 : 0,
+              resetReqDaySecs: prev.resetReqDaySecs > 0 ? prev.resetReqDaySecs - 1 : 0,
+            };
+          });
+        }, 1000);
+        return () => clearInterval(timer);
+      }, [groqRate, rateState.minLimited, rateState.dayLimited]);
 
       const reset = () => { setImages([]); setPdfs([]); setAllResults(null); setConfirmed(false); };
 
       const retryFailed = async () => {
         const failedIdxs = images.map((img, i) => img.status === "error" ? i : null).filter(i => i !== null);
         if (!failedIdxs.length) return;
+        const rs = getRateState();
+        if (rs.minLimited || rs.dayLimited) { setRateState(rs); return; }
         setScanning(true);
+        recordScan(failedIdxs.length);
+        setRateState(getRateState());
         const retryResults = await Promise.all(failedIdxs.map(async idx => {
           setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "scanning", error: "" } : m));
           try {
@@ -286,17 +360,24 @@
 
       // ── Scan all ──
       const scanAll = async () => {
+        const rs = getRateState();
+        if (rs.dayLimited) { setRateState(rs); return; }
+        if (rs.minLimited) { setRateState(rs); return; }
         setScanning(true); setAllResults(null);
 
         const allBets = [];
+        const totalFiles = images.length + pdfs.length;
+        recordScan(totalFiles);
+        setRateState(getRateState());
 
         // Scan images in parallel
         if (images.length) {
           const imgResults = await Promise.all(images.map(async (img, idx) => {
             setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "scanning" } : m));
             try {
-              const bets = await scanSingleImage(img);
+              const { bets, rateLimit } = await scanSingleImage(img);
               setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "done", bets } : m));
+              if (rateLimit) applyGroqRateLimit(rateLimit);
               return bets;
             } catch (err) {
               setImages(prev => prev.map((m, i) => i === idx ? { ...m, status: "error", error: err.message } : m));
@@ -315,8 +396,9 @@
             const pdfText = await extractPdfText(pdf.file);
             if (!pdfText.trim()) throw new Error("No text found in PDF. Try uploading a screenshot instead.");
             setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "scanning" } : p));
-            const bets = await scanPdfText(pdfText);
+            const { bets, rateLimit } = await scanPdfText(pdfText);
             setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "done", bets } : p));
+            if (rateLimit) applyGroqRateLimit(rateLimit);
             allBets.push(...bets);
           } catch (err) {
             setPdfs(prev => prev.map((p, i) => i === idx ? { ...p, status: "error", error: err.message } : p));
@@ -362,7 +444,7 @@
                 betType: BET_TYPES.includes(l.betType) ? l.betType : "Other",
                 selection: l.selection || "",
                 odds: l.odds ? Number(l.odds) : null,
-                legStatus: l.legStatus || "Pending",
+                legStatus: l.legStatus === "Loss" ? "Settled" : (l.legStatus || "Pending"),
               })),
             };
           }
@@ -420,6 +502,74 @@
           <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
             Upload bet slip photos or your SG Pools PDF transaction history.
           </div>
+
+          {/* Rate limit banner / usage meter */}
+          {(() => {
+            // Prefer Groq real data, fall back to local estimates
+            const remainMin = groqRate?.remainingReqMin ?? (RATE_LIMIT_PER_MIN - rateState.usedMin);
+            const limitMin  = groqRate?.limitReqMin     ?? RATE_LIMIT_PER_MIN;
+            const remainDay = groqRate?.remainingReqDay ?? rateState.remaining;
+            const limitDay  = groqRate?.limitReqDay     ?? RATE_LIMIT_PER_DAY;
+            const resetMinS = groqRate?.resetReqMinSecs ?? rateState.minResetsIn;
+            const resetDayS = groqRate?.resetReqDaySecs ?? rateState.dayResetsIn;
+            const isFromGroq = !!groqRate;
+            const minLimited = remainMin <= 0;
+            const dayLimited = remainDay <= 0;
+
+            if (minLimited || dayLimited) {
+              return (
+                <div style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b", marginBottom: 4 }}>
+                    🚫 {dayLimited ? "Daily scan limit reached" : "Minute scan limit reached"}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#991b1b", marginBottom: 8 }}>
+                    {dayLimited
+                      ? `${limitDay} daily scans used. Resets in ${fmtCountdown(resetDayS)}.`
+                      : `Too many scans in the last minute (${limitMin}/min). Available again in ${fmtCountdown(resetMinS)}.`}
+                    {isFromGroq && <span style={{ marginLeft: 6, fontSize: 10, opacity: 0.7 }}>· Live from Groq</span>}
+                  </div>
+                  <div style={{ background: "#fecaca", borderRadius: 6, height: 6, overflow: "hidden" }}>
+                    <div style={{ height: "100%", background: "#ef4444", width: "100%" }} />
+                  </div>
+                </div>
+              );
+            }
+
+            if (rateState.usedToday > 0 || groqRate) {
+              const usedDay = limitDay - remainDay;
+              const usedMin = limitMin - remainMin;
+              const pctDay  = Math.min((usedDay / limitDay) * 100, 100);
+              return (
+                <div style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 6 }}>
+                    <span>📊 Daily scans {isFromGroq && <span style={{ fontWeight: 400, color: "#a3a3a3" }}>· Live</span>}</span>
+                    <span style={{ color: pctDay > 80 ? "#f59e0b" : "#6b7280" }}>
+                      {usedDay} / {limitDay} used · {remainDay} left
+                    </span>
+                  </div>
+                  <div style={{ background: "#e5e7eb", borderRadius: 6, height: 6, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%",
+                      background: pctDay > 80 ? "#f59e0b" : "#6366f1",
+                      width: `${pctDay}%`,
+                      transition: "width 0.3s",
+                    }} />
+                  </div>
+                  {usedMin > 0 && (
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 5 }}>
+                      This minute: {usedMin} / {limitMin} · resets in {fmtCountdown(resetMinS)}
+                    </div>
+                  )}
+                  {groqRate?.remainingTokMin != null && (
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 2 }}>
+                      Tokens this minute: {groqRate.limitTokMin - groqRate.remainingTokMin} / {groqRate.limitTokMin}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+            return null;
+          })()}
 
           {/* Mode toggle */}
           {!allResults && !confirmed && (
@@ -513,18 +663,31 @@
           )}
 
           {/* Scan button */}
-          {totalQueued > 0 && !allResults && !confirmed && (
-            <button onClick={scanAll} disabled={scanning} style={{
-              width: "100%", background: scanning ? "#818cf8" : "#6366f1", color: "#fff",
-              border: "none", borderRadius: 8, padding: "12px", fontSize: 14, fontWeight: 600,
-              cursor: scanning ? "not-allowed" : "pointer", marginBottom: 16,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            }}>
-              {scanning ? (
-                <><span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Scanning...</>
-              ) : `🔍 Scan ${totalQueued} file${totalQueued !== 1 ? "s" : ""}`}
-            </button>
-          )}
+          {totalQueued > 0 && !allResults && !confirmed && (() => {
+            const remainMin  = groqRate?.remainingReqMin ?? (RATE_LIMIT_PER_MIN - rateState.usedMin);
+            const remainDay  = groqRate?.remainingReqDay ?? rateState.remaining;
+            const resetMinS  = groqRate?.resetReqMinSecs ?? rateState.minResetsIn;
+            const resetDayS  = groqRate?.resetReqDaySecs ?? rateState.dayResetsIn;
+            const minLimited = remainMin <= 0;
+            const dayLimited = remainDay <= 0;
+            const isLimited  = minLimited || dayLimited;
+            return (
+              <button onClick={scanAll} disabled={scanning || isLimited} style={{
+                width: "100%",
+                background: isLimited ? "#d1d5db" : scanning ? "#818cf8" : "#6366f1",
+                color: isLimited ? "#6b7280" : "#fff",
+                border: "none", borderRadius: 8, padding: "12px", fontSize: 14, fontWeight: 600,
+                cursor: (scanning || isLimited) ? "not-allowed" : "pointer", marginBottom: 16,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}>
+                {scanning ? (
+                  <><span style={{ display: "inline-block", width: 14, height: 14, border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Scanning...</>
+                ) : minLimited ? `⏳ Available in ${fmtCountdown(resetMinS)}`
+                  : dayLimited ? `⏳ Daily limit hit · resets in ${fmtCountdown(resetDayS)}`
+                  : `🔍 Scan ${totalQueued} file${totalQueued !== 1 ? "s" : ""}`}
+              </button>
+            );
+          })()}
 
           {/* Error summary + retry */}
           {allResults && errorCount > 0 && (
@@ -1110,11 +1273,14 @@
                       if (isParlay && b.legs && resolvedStatus !== "Pending") {
                         updatedLegs = b.legs.map(l => ({
                           ...l,
-                          legStatus: resolvedStatus === "Void"    ? "Void"
-                                   : resolvedStatus === "Win"     ? "Win"
-                                   : resolvedStatus === "Loss"    ? "Loss"
-                                   : "Settled",
+                          legStatus: resolvedStatus === "Win"  ? "Win"
+                                   : resolvedStatus === "Void" ? "Void"
+                                   : "Settled",  // Loss or any other settled state → grey Settled
                         }));
+                      }
+                      // If switching back to Pending, reset all legs to Pending too
+                      if (isParlay && b.legs && resolvedStatus === "Pending") {
+                        updatedLegs = b.legs.map(l => ({ ...l, legStatus: "Pending" }));
                       }
 
                       updateBet(b.id, {
