@@ -797,7 +797,9 @@
       const roi      = totalStaked > 0 ? ((netPnL / totalStaked) * 100).toFixed(1) : "0.0";
       const winRate  = settled.length > 0 ? ((wins.length / settled.length) * 100).toFixed(0) : "—";
       const pnlColor = netPnL >= 0 ? "#10b981" : "#ef4444";
-      const filteredBets = filterStatus === "All" ? bets : bets.filter(b => b.status === filterStatus);
+      const filteredBets = filterStatus === "All"
+        ? bets
+        : bets.filter(b => (b.status || "").trim().toLowerCase() === filterStatus.toLowerCase());
 
       const NAV = [
         { id: "dashboard", label: "Dashboard" },
@@ -1108,9 +1110,10 @@
                       if (isParlay && b.legs && resolvedStatus !== "Pending") {
                         updatedLegs = b.legs.map(l => ({
                           ...l,
-                          legStatus: resolvedStatus === "Void" ? "Void"
-                            : resolvedStatus === "Win" ? "Win"
-                            : l.legStatus === "Pending" ? "Settled" : l.legStatus,
+                          legStatus: resolvedStatus === "Void"    ? "Void"
+                                   : resolvedStatus === "Win"     ? "Win"
+                                   : resolvedStatus === "Loss"    ? "Loss"
+                                   : "Settled",
                         }));
                       }
 
