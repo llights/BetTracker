@@ -83,6 +83,36 @@ const fmtCountdown = secs => {
   return `${h}h ${rm}m`;
 };
 
+// ── Backup / Export / Import ────────────────────────────────────────────
+const exportBets = bets => {
+  const payload = {
+    app: "SG Pools Tracker",
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    bets
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json"
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const dateStr = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `sgpools-backup-${dateStr}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+const validateImportedBets = data => {
+  // Accept either { bets: [...] } wrapper or a raw array
+  const arr = Array.isArray(data) ? data : data && Array.isArray(data.bets) ? data.bets : null;
+  if (!arr) return null;
+  // Basic shape check on first few entries
+  const valid = arr.every(b => b && typeof b === "object" && "id" in b && "status" in b && "betCategory" in b);
+  return valid ? arr : null;
+};
+
 // Duplicate detection — match on match name + betType + date (fuzzy)
 const findDuplicates = (newBets, existingBets) => {
   const normalize = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -316,21 +346,6 @@ function readFileAsBase64(file) {
     reader.readAsDataURL(file);
   });
 }
-
-// Extract all text from a PDF file using PDF.js
-async function extractPdfText(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await window.pdfjsLib.getDocument({
-    data: arrayBuffer
-  }).promise;
-  let fullText = "";
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    fullText += content.items.map(i => i.str).join(" ") + "\n";
-  }
-  return fullText;
-}
 async function scanSingleImage(img) {
   const res = await fetch(WORKER_URL, {
     method: "POST",
@@ -349,23 +364,6 @@ async function scanSingleImage(img) {
     rateLimit: data.rateLimit || null
   };
 }
-async function scanPdfText(pdfText) {
-  const res = await fetch(WORKER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      pdfText
-    })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
-  return {
-    bets: data.bets || [],
-    rateLimit: data.rateLimit || null
-  };
-}
 
 // ── Scan Tab ───────────────────────────────────────────────────────────────
 
@@ -374,29 +372,20 @@ function ScanTab({
   setTab,
   existingBets
 }) {
-  // mode: "image" | "pdf"
-  const [mode, setMode] = useState("image");
   // image queue items: { dataUrl, base64, mediaType, name, status, bets, error }
   const [images, setImages] = useState([]);
-  // pdf queue items: { name, file, status, bets, error, pageCount }
-  const [pdfs, setPdfs] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [allResults, setAllResults] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
   const [dupWarning, setDupWarning] = useState([]);
   const [rateState, setRateState] = useState(() => getRateState());
-  const [groqRate, setGroqRate] = useState(null); // live data from Groq headers
+  const [groqRate, setGroqRate] = useState(null);
   const imgInputRef = useRef();
-  const pdfInputRef = useRef();
-
-  // Apply Groq's real rate limit data from response headers
   const applyGroqRateLimit = rl => {
     if (!rl) return;
     setGroqRate(rl);
-    setRateState(getRateState()); // also refresh local estimate
+    setRateState(getRateState());
   };
-
-  // Refresh countdown every second when limited
   React.useEffect(() => {
     const isLimited = groqRate ? groqRate.remainingReqMin === 0 || groqRate.remainingReqDay === 0 : rateState.minLimited || rateState.dayLimited;
     if (!isLimited) return;
@@ -415,7 +404,6 @@ function ScanTab({
   }, [groqRate, rateState.minLimited, rateState.dayLimited]);
   const reset = () => {
     setImages([]);
-    setPdfs([]);
     setAllResults(null);
     setConfirmed(false);
   };
@@ -476,27 +464,9 @@ function ScanTab({
     setAllResults(null);
     setConfirmed(false);
   };
-
-  // ── PDF handlers ──
-  const addPdfFiles = files => {
-    const pdfFiles = Array.from(files).filter(f => f.type === "application/pdf" || f.name.endsWith(".pdf"));
-    if (!pdfFiles.length) return;
-    setPdfs(prev => [...prev, ...pdfFiles.map(f => ({
-      name: f.name,
-      file: f,
-      status: "idle",
-      bets: [],
-      error: "",
-      pageCount: null
-    }))]);
-    setAllResults(null);
-    setConfirmed(false);
-  };
   const handleDrop = e => {
     e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
-    addImageFiles(files.filter(f => f.type.startsWith("image/")));
-    addPdfFiles(files.filter(f => f.type === "application/pdf" || f.name.endsWith(".pdf")));
+    addImageFiles(Array.from(e.dataTransfer.files));
   };
 
   // ── Scan all ──
@@ -513,75 +483,37 @@ function ScanTab({
     setScanning(true);
     setAllResults(null);
     const allBets = [];
-    const totalFiles = images.length + pdfs.length;
-    recordScan(totalFiles);
+    recordScan(images.length);
     setRateState(getRateState());
 
     // Scan images in parallel
-    if (images.length) {
-      const imgResults = await Promise.all(images.map(async (img, idx) => {
-        setImages(prev => prev.map((m, i) => i === idx ? {
-          ...m,
-          status: "scanning"
-        } : m));
-        try {
-          const {
-            bets,
-            rateLimit
-          } = await scanSingleImage(img);
-          setImages(prev => prev.map((m, i) => i === idx ? {
-            ...m,
-            status: "done",
-            bets
-          } : m));
-          if (rateLimit) applyGroqRateLimit(rateLimit);
-          return bets;
-        } catch (err) {
-          setImages(prev => prev.map((m, i) => i === idx ? {
-            ...m,
-            status: "error",
-            error: err.message
-          } : m));
-          return [];
-        }
-      }));
-      allBets.push(...imgResults.flat());
-    }
-
-    // Scan PDFs sequentially (text extraction is heavier)
-    for (let idx = 0; idx < pdfs.length; idx++) {
-      const pdf = pdfs[idx];
-      setPdfs(prev => prev.map((p, i) => i === idx ? {
-        ...p,
-        status: "extracting"
-      } : p));
+    const imgResults = await Promise.all(images.map(async (img, idx) => {
+      setImages(prev => prev.map((m, i) => i === idx ? {
+        ...m,
+        status: "scanning"
+      } : m));
       try {
-        if (!window._pdfJsReady) throw new Error("PDF reader not ready yet, please try again.");
-        const pdfText = await extractPdfText(pdf.file);
-        if (!pdfText.trim()) throw new Error("No text found in PDF. Try uploading a screenshot instead.");
-        setPdfs(prev => prev.map((p, i) => i === idx ? {
-          ...p,
-          status: "scanning"
-        } : p));
         const {
           bets,
           rateLimit
-        } = await scanPdfText(pdfText);
-        setPdfs(prev => prev.map((p, i) => i === idx ? {
-          ...p,
+        } = await scanSingleImage(img);
+        setImages(prev => prev.map((m, i) => i === idx ? {
+          ...m,
           status: "done",
           bets
-        } : p));
+        } : m));
         if (rateLimit) applyGroqRateLimit(rateLimit);
-        allBets.push(...bets);
+        return bets;
       } catch (err) {
-        setPdfs(prev => prev.map((p, i) => i === idx ? {
-          ...p,
+        setImages(prev => prev.map((m, i) => i === idx ? {
+          ...m,
           status: "error",
           error: err.message
-        } : p));
+        } : m));
+        return [];
       }
-    }
+    }));
+    allBets.push(...imgResults.flat());
 
     // Auto-calculate combined odds for parlays from leg odds
     const enriched = allBets.map(b => {
@@ -670,8 +602,8 @@ function ScanTab({
     setTimeout(() => setTab("history"), 1500);
   };
   const totalFound = allResults ? allResults.length : 0;
-  const totalQueued = images.length + pdfs.length;
-  const errorCount = images.filter(m => m.status === "error").length + pdfs.filter(p => p.status === "error").length;
+  const totalQueued = images.length;
+  const errorCount = images.filter(m => m.status === "error").length;
   function Spinner() {
     return /*#__PURE__*/React.createElement("span", {
       style: {
@@ -692,13 +624,13 @@ function ScanTab({
       fontWeight: 700,
       marginBottom: 4
     }
-  }, "Scan / Import"), /*#__PURE__*/React.createElement("div", {
+  }, "Scan Slips"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: "#6b7280",
       marginBottom: 16
     }
-  }, "Upload bet slip photos or your SG Pools PDF transaction history."), (() => {
+  }, "Upload one or more bet slip photos — AI will extract all bets automatically."), (() => {
     // Prefer Groq real data, fall back to local estimates
     const remainMin = groqRate?.remainingReqMin ?? RATE_LIMIT_PER_MIN - rateState.usedMin;
     const limitMin = groqRate?.limitReqMin ?? RATE_LIMIT_PER_MIN;
@@ -811,32 +743,7 @@ function ScanTab({
       }, "Tokens this minute: ", groqRate.limitTokMin - groqRate.remainingTokMin, " / ", groqRate.limitTokMin));
     }
     return null;
-  })(), !allResults && !confirmed && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      background: "#f3f4f6",
-      borderRadius: 10,
-      padding: 4,
-      marginBottom: 16,
-      gap: 4
-    }
-  }, [["image", "📷 Slip Photos"], ["pdf", "📄 PDF History"]].map(([m, label]) => /*#__PURE__*/React.createElement("button", {
-    key: m,
-    onClick: () => setMode(m),
-    style: {
-      flex: 1,
-      padding: "8px",
-      borderRadius: 7,
-      border: "none",
-      fontSize: 13,
-      fontWeight: 600,
-      cursor: "pointer",
-      background: mode === m ? "#fff" : "transparent",
-      color: mode === m ? "#111827" : "#6b7280",
-      boxShadow: mode === m ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
-      transition: "all 0.15s"
-    }
-  }, label))), mode === "image" && !allResults && !confirmed && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  })(), !allResults && !confirmed && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onDrop: handleDrop,
     onDragOver: e => e.preventDefault(),
     onClick: () => imgInputRef.current.click(),
@@ -956,138 +863,7 @@ function ScanTab({
       fontSize: 13,
       cursor: "pointer"
     }
-  }, "+ Add more images"))), mode === "pdf" && !allResults && !confirmed && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#f0f9ff",
-      border: "1px solid #bae6fd",
-      borderRadius: 10,
-      padding: "10px 14px",
-      marginBottom: 14,
-      fontSize: 12,
-      color: "#0369a1"
-    }
-  }, "💡 Download your transaction history from ", /*#__PURE__*/React.createElement("strong", null, "sgpools.com.sg → My Account → Transaction History"), ", save as PDF, then upload here."), /*#__PURE__*/React.createElement("div", {
-    onDrop: handleDrop,
-    onDragOver: e => e.preventDefault(),
-    onClick: () => pdfInputRef.current.click(),
-    style: {
-      border: "2px dashed #d1d5db",
-      borderRadius: 14,
-      background: "#fff",
-      padding: "28px 20px",
-      textAlign: "center",
-      cursor: "pointer",
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 32,
-      marginBottom: 8
-    }
-  }, "📄"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 600,
-      fontSize: 14,
-      marginBottom: 4
-    }
-  }, "Tap to upload PDF"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: "#9ca3af",
-      fontSize: 12
-    }
-  }, "Multiple PDFs OK"), /*#__PURE__*/React.createElement("input", {
-    ref: pdfInputRef,
-    type: "file",
-    accept: ".pdf,application/pdf",
-    multiple: true,
-    style: {
-      display: "none"
-    },
-    onChange: e => addPdfFiles(e.target.files)
-  })), pdfs.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 8,
-      marginBottom: 14
-    }
-  }, pdfs.map((pdf, idx) => /*#__PURE__*/React.createElement("div", {
-    key: idx,
-    style: {
-      background: "#fff",
-      border: "1px solid #e5e7eb",
-      borderRadius: 10,
-      padding: "10px 14px",
-      display: "flex",
-      alignItems: "center",
-      gap: 10
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 24,
-      flexShrink: 0
-    }
-  }, "📄"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      fontSize: 12,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 500,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-      marginBottom: 2
-    }
-  }, pdf.name), pdf.status === "idle" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#9ca3af"
-    }
-  }, "Ready"), pdf.status === "extracting" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#6366f1",
-      display: "flex",
-      alignItems: "center",
-      gap: 5
-    }
-  }, /*#__PURE__*/React.createElement(Spinner, null), " Reading PDF..."), pdf.status === "scanning" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#6366f1",
-      display: "flex",
-      alignItems: "center",
-      gap: 5
-    }
-  }, /*#__PURE__*/React.createElement(Spinner, null), " Analysing bets..."), pdf.status === "done" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#10b981"
-    }
-  }, "✓ ", pdf.bets.length, " bet", pdf.bets.length !== 1 ? "s" : "", " found"), pdf.status === "error" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#ef4444"
-    }
-  }, "⚠ ", pdf.error)), !scanning && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setPdfs(prev => prev.filter((_, i) => i !== idx)),
-    style: {
-      background: "none",
-      border: "none",
-      color: "#9ca3af",
-      cursor: "pointer",
-      fontSize: 16
-    }
-  }, "✕"))), !scanning && /*#__PURE__*/React.createElement("button", {
-    onClick: () => pdfInputRef.current.click(),
-    style: {
-      border: "1px dashed #d1d5db",
-      borderRadius: 8,
-      background: "#fff",
-      color: "#6b7280",
-      padding: "9px",
-      fontSize: 13,
-      cursor: "pointer"
-    }
-  }, "+ Add more PDFs"))), totalQueued > 0 && !allResults && !confirmed && (() => {
+  }, "+ Add more images"))), totalQueued > 0 && !allResults && !confirmed && (() => {
     const remainMin = groqRate?.remainingReqMin ?? RATE_LIMIT_PER_MIN - rateState.usedMin;
     const remainDay = groqRate?.remainingReqDay ?? rateState.remaining;
     const resetMinS = groqRate?.resetReqMinSecs ?? rateState.minResetsIn;
@@ -1244,7 +1020,7 @@ function ScanTab({
       fontSize: 13,
       marginBottom: 14
     }
-  }, "⚠️ No bets detected. Check that your PDF has selectable text (not a scanned image).") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "⚠️ No bets detected. Try a clearer, well-lit photo of your bet slip.") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       fontWeight: 600,
@@ -1558,6 +1334,9 @@ function App() {
   const [filterStatus, setFilterStatus] = useState("All");
   const [expandedId, setExpandedId] = useState(null);
   const [historyView, setHistoryView] = useState("Singles"); // "Singles" | "Parlays"
+  const [importMsg, setImportMsg] = useState(null); // { type: "success"|"error", text }
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+  const importInputRef = useRef();
   // local edits for expanded bet in history: { [id]: { payout, stake, odds } }
   const [histEdits, setHistEdits] = useState({});
   const setField = k => v => setForm(f => ({
@@ -1659,6 +1438,39 @@ function App() {
       return next;
     });
   }, []);
+  const handleImportFile = file => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result);
+        const imported = validateImportedBets(data);
+        if (!imported) {
+          setImportMsg({
+            type: "error",
+            text: "This file doesn't look like a valid SG Pools Tracker backup."
+          });
+          return;
+        }
+        const merge = window.confirm(`Found ${imported.length} bet${imported.length !== 1 ? "s" : ""} in this backup.\n\nTap OK to MERGE with your current bets, or Cancel to REPLACE all current bets with this backup.`);
+        setBets(prev => {
+          const next = merge ? [...imported, ...prev] : imported;
+          saveBets(next);
+          return next;
+        });
+        setImportMsg({
+          type: "success",
+          text: `Imported ${imported.length} bet${imported.length !== 1 ? "s" : ""} (${merge ? "merged" : "replaced"}).`
+        });
+      } catch {
+        setImportMsg({
+          type: "error",
+          text: "Couldn't read this file — make sure it's a valid JSON backup."
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
 
   // helpers for history edit state
   const getEdit = (id, field, fallback) => histEdits[id]?.[field] !== undefined ? histEdits[id][field] : fallback;
@@ -2408,11 +2220,87 @@ function App() {
     }
   }, "Save Bet"))), tab === "history" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 18,
-      fontWeight: 700,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
       marginBottom: 12
     }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700
+    }
   }, "History"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => exportBets(bets),
+    disabled: bets.length === 0,
+    style: {
+      background: "#fff",
+      border: "1px solid #d1d5db",
+      color: bets.length === 0 ? "#d1d5db" : "#374151",
+      borderRadius: 7,
+      padding: "6px 10px",
+      fontSize: 12,
+      fontWeight: 500,
+      cursor: bets.length === 0 ? "not-allowed" : "pointer",
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, "⬇️ Export"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => importInputRef.current.click(),
+    style: {
+      background: "#fff",
+      border: "1px solid #d1d5db",
+      color: "#374151",
+      borderRadius: 7,
+      padding: "6px 10px",
+      fontSize: 12,
+      fontWeight: 500,
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, "⬆️ Import"), /*#__PURE__*/React.createElement("input", {
+    ref: importInputRef,
+    type: "file",
+    accept: "application/json,.json",
+    style: {
+      display: "none"
+    },
+    onChange: e => {
+      handleImportFile(e.target.files[0]);
+      e.target.value = "";
+    }
+  }))), importMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: importMsg.type === "success" ? "#d1fae5" : "#fee2e2",
+      color: importMsg.type === "success" ? "#065f46" : "#991b1b",
+      borderRadius: 8,
+      padding: "10px 14px",
+      fontSize: 13,
+      marginBottom: 12,
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", null, importMsg.type === "success" ? "✅" : "⚠️", " ", importMsg.text), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setImportMsg(null),
+    style: {
+      background: "none",
+      border: "none",
+      color: "inherit",
+      cursor: "pointer",
+      fontSize: 14,
+      opacity: 0.7
+    }
+  }, "✕")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       background: "#f3f4f6",
@@ -2531,7 +2419,10 @@ function App() {
       }, /*#__PURE__*/React.createElement("div", {
         onClick: () => {
           setExpandedId(isOpen ? null : b.id);
-          if (isOpen) clearEdits(b.id);
+          if (isOpen) {
+            clearEdits(b.id);
+            setDeleteConfirmId(null);
+          }
         },
         style: {
           padding: "12px 14px",
@@ -2662,6 +2553,7 @@ function App() {
         type: "text",
         value: getEdit(b.id, "match", b.match || ""),
         onChange: e => setEdit(b.id, "match", e.target.value),
+        onBlur: () => saveEdits(),
         style: {
           width: "100%",
           padding: "7px 10px",
@@ -2721,6 +2613,7 @@ function App() {
         type: "number",
         value: draftStake,
         onChange: e => setEdit(b.id, "stake", e.target.value),
+        onBlur: () => saveEdits(),
         style: {
           width: "100%",
           padding: "7px 10px",
@@ -2745,6 +2638,7 @@ function App() {
         value: draftOdds,
         placeholder: "—",
         onChange: e => setEdit(b.id, "odds", e.target.value),
+        onBlur: () => saveEdits(),
         style: {
           width: "100%",
           padding: "7px 10px",
@@ -2776,6 +2670,7 @@ function App() {
         type: "number",
         value: displayPayout,
         onChange: e => setEdit(b.id, "payout", e.target.value),
+        onBlur: () => saveEdits(),
         placeholder: "e.g. 18.50",
         style: {
           width: "100%",
@@ -2794,25 +2689,52 @@ function App() {
         }
       }, "Net profit: +$", netProfit.toFixed(2))), /*#__PURE__*/React.createElement("div", {
         style: {
-          display: "flex",
-          gap: 8,
           marginTop: 2
         }
-      }, /*#__PURE__*/React.createElement("button", {
-        onClick: () => saveEdits(),
+      }, deleteConfirmId === b.id ? /*#__PURE__*/React.createElement("div", {
         style: {
-          flex: 1,
-          background: "#0f172a",
-          color: "#fff",
-          border: "none",
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          background: "#fef2f2",
+          border: "1px solid #fca5a5",
           borderRadius: 7,
-          padding: "8px",
-          fontSize: 13,
+          padding: "8px 10px"
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 12,
+          color: "#991b1b",
+          flex: 1
+        }
+      }, "Delete this bet permanently?"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => setDeleteConfirmId(null),
+        style: {
+          background: "#fff",
+          border: "1px solid #d1d5db",
+          color: "#374151",
+          borderRadius: 6,
+          padding: "5px 10px",
+          fontSize: 12,
+          cursor: "pointer"
+        }
+      }, "Cancel"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => {
+          deleteBet(b.id);
+          setDeleteConfirmId(null);
+        },
+        style: {
+          background: "#dc2626",
+          border: "none",
+          color: "#fff",
+          borderRadius: 6,
+          padding: "5px 10px",
+          fontSize: 12,
           fontWeight: 600,
           cursor: "pointer"
         }
-      }, "Save Changes"), /*#__PURE__*/React.createElement("button", {
-        onClick: () => deleteBet(b.id),
+      }, "Delete")) : /*#__PURE__*/React.createElement("button", {
+        onClick: () => setDeleteConfirmId(b.id),
         style: {
           background: "none",
           border: "1px solid #fca5a5",
