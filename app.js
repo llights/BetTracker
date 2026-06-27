@@ -348,7 +348,8 @@ function readFileAsBase64(file) {
 }
 
 // Compress and resize image before sending to reduce token usage
-function compressImage(file, maxWidth = 1280, quality = 0.75) {
+// qwen3.6-27b has 8000 TPM limit on free tier — keep images small
+function compressImage(file, maxWidth = 800, quality = 0.6) {
   return new Promise(resolve => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -361,7 +362,14 @@ function compressImage(file, maxWidth = 1280, quality = 0.75) {
       canvas.width = w;
       canvas.height = h;
       canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      // Start at quality 0.6, reduce further if still too big
+      let q = quality;
+      let dataUrl = canvas.toDataURL("image/jpeg", q);
+      // Target ~400KB base64 (~300KB image) to stay under token limit
+      while (dataUrl.length > 400000 && q > 0.2) {
+        q -= 0.1;
+        dataUrl = canvas.toDataURL("image/jpeg", q);
+      }
       resolve({
         dataUrl,
         base64: dataUrl.split(",")[1],
@@ -371,7 +379,6 @@ function compressImage(file, maxWidth = 1280, quality = 0.75) {
     };
     img.onerror = async () => {
       URL.revokeObjectURL(url);
-      // Fallback: read as-is
       resolve(await readFileAsBase64(file));
     };
     img.src = url;
