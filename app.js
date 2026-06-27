@@ -346,6 +346,37 @@ function readFileAsBase64(file) {
     reader.readAsDataURL(file);
   });
 }
+
+// Compress and resize image before sending to reduce token usage
+function compressImage(file, maxWidth = 1280, quality = 0.75) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxWidth / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      resolve({
+        dataUrl,
+        base64: dataUrl.split(",")[1],
+        mediaType: "image/jpeg",
+        name: file.name
+      });
+    };
+    img.onerror = async () => {
+      URL.revokeObjectURL(url);
+      // Fallback: read as-is
+      resolve(await readFileAsBase64(file));
+    };
+    img.src = url;
+  });
+}
 async function scanSingleImage(img) {
   const res = await fetch(WORKER_URL, {
     method: "POST",
@@ -457,7 +488,7 @@ function ScanTab({
   const addImageFiles = async files => {
     const imgFiles = Array.from(files).filter(f => f.type.startsWith("image/"));
     if (!imgFiles.length) return;
-    const loaded = await Promise.all(imgFiles.map(readFileAsBase64));
+    const loaded = await Promise.all(imgFiles.map(f => compressImage(f)));
     setImages(prev => [...prev, ...loaded.map(img => ({
       ...img,
       status: "idle",
