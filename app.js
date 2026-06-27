@@ -358,7 +358,10 @@ async function scanSingleImage(img) {
     })
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Worker error ${res.status}`);
+  if (!res.ok) {
+    const detail = data.detail ? typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail) : "";
+    throw new Error(`${data.error || "Worker error " + res.status}${detail ? ": " + detail.slice(0, 200) : ""}`);
+  }
   return {
     bets: data.bets || [],
     rateLimit: data.rateLimit || null
