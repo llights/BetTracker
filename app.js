@@ -529,10 +529,15 @@ function ScanTab({
       }
       return b;
     });
-    setAllResults(enriched.map(b => ({
-      ...b,
-      status: b.status || "Pending"
-    })));
+    const succeeded = images.filter(m => m.status === "done").length;
+
+    // Only show results panel if at least one image scanned successfully
+    if (succeeded > 0) {
+      setAllResults(enriched.map(b => ({
+        ...b,
+        status: b.status || "Pending"
+      })));
+    }
     setScanning(false);
   };
   const updateResult = (i, field, value) => {
@@ -901,7 +906,7 @@ function ScanTab({
         animation: "spin 0.8s linear infinite"
       }
     }), " Scanning...") : minLimited ? `⏳ Available in ${fmtCountdown(resetMinS)}` : dayLimited ? `⏳ Daily limit hit · resets in ${fmtCountdown(resetDayS)}` : `🔍 Scan ${totalQueued} file${totalQueued !== 1 ? "s" : ""}`);
-  })(), allResults && errorCount > 0 && /*#__PURE__*/React.createElement("div", {
+  })(), images.some(m => m.status === "error") && !scanning && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff7ed",
       border: "1px solid #fed7aa",
@@ -914,7 +919,7 @@ function ScanTab({
       justifyContent: "space-between",
       alignItems: "center"
     }
-  }, /*#__PURE__*/React.createElement("span", null, "⚠️ ", errorCount, " file", errorCount !== 1 ? "s" : "", " failed."), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", null, "⚠️ ", errorCount, " image", errorCount !== 1 ? "s" : "", " failed to scan."), /*#__PURE__*/React.createElement("button", {
     onClick: retryFailed,
     disabled: scanning,
     style: {
@@ -927,33 +932,7 @@ function ScanTab({
       fontWeight: 600,
       cursor: "pointer"
     }
-  }, "🔄 Retry")), !allResults && images.some(m => m.status === "error") && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#fff7ed",
-      border: "1px solid #fed7aa",
-      borderRadius: 8,
-      padding: "10px 14px",
-      fontSize: 13,
-      color: "#c2410c",
-      marginBottom: 12,
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center"
-    }
-  }, /*#__PURE__*/React.createElement("span", null, "⚠️ Some images failed to scan."), /*#__PURE__*/React.createElement("button", {
-    onClick: retryFailed,
-    disabled: scanning,
-    style: {
-      background: "#fff7ed",
-      border: "1px solid #fed7aa",
-      color: "#c2410c",
-      borderRadius: 6,
-      padding: "4px 10px",
-      fontSize: 12,
-      fontWeight: 600,
-      cursor: "pointer"
-    }
-  }, "🔄 Retry Failed")), dupWarning.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "🔄 Retry")), dupWarning.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff7ed",
       border: "1px solid #fbbf24",
