@@ -528,6 +528,7 @@ function ScanTab({
     setRateState(getRateState());
 
     // Scan images in parallel
+    let anySucceeded = false;
     const imgResults = await Promise.all(images.map(async (img, idx) => {
       setImages(prev => prev.map((m, i) => i === idx ? {
         ...m,
@@ -544,6 +545,7 @@ function ScanTab({
           bets
         } : m));
         if (rateLimit) applyGroqRateLimit(rateLimit);
+        anySucceeded = true;
         return bets;
       } catch (err) {
         setImages(prev => prev.map((m, i) => i === idx ? {
@@ -570,10 +572,9 @@ function ScanTab({
       }
       return b;
     });
-    const succeeded = images.filter(m => m.status === "done").length;
 
-    // Only show results panel if at least one image scanned successfully
-    if (succeeded > 0) {
+    // Always set allResults if any image succeeded (even if 0 bets found)
+    if (anySucceeded) {
       setAllResults(enriched.map(b => ({
         ...b,
         status: b.status || "Pending"
